@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-04-24
+
+### Fixed
+- **Intermittent "scheduled /wait never fires" bug.** Root cause: on long
+  Claude answers + repeated TUI redraws (`auto mode` bar, `/mcp` status,
+  spinner frames), the raw-bytes tail buffer (4 KB) filled up and the
+  `❯` prompt line scrolled off before `idle_detector` saw it. Monitor
+  logged `reasons.prompt_visible: False drift: True` for 45+ seconds
+  while Claude was actually idle.
+  - Increased `tail_chars` 4 KB → 16 KB so the prompt stays in view.
+  - `PROMPT_RE` split into `PROMPT_RE_END` (line ending with prompt)
+    and `PROMPT_RE_LINE` (whole line is prompt + whitespace) — more
+    tolerant of modern Claude UI where `❯` sits on its own line.
+  - Prompt-visibility search widened from last 5 non-empty lines to
+    last 10.
+
+### Added
+- When monitor has held dispatch for 10s+ with drift detected, it dumps
+  the last 5 stripped tail lines to `monitor.log` for diagnosis.
+
 ## [0.3.2] - 2026-04-24
 
 ### Added

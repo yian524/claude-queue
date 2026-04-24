@@ -29,8 +29,15 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
 #   v2: ❯       (heavy angle, 2.1.x)
 #   v2: ›       (single angle)
 #   fallback > at end of line
-# Any of these followed only by whitespace means the input area is empty.
-PROMPT_RE = re.compile(r"(?:[❯›〉]|│\s*>\s*│?)\s*$")
+#
+# We accept either:
+#   a) a line ENDING with an empty prompt char (trailing whitespace OK),
+#   b) a line where the prompt char is at the START and the whole line is
+#      just the prompt + whitespace.
+# The start-of-line form catches newer UI where Claude draws "❯ " at
+# column 1 with no other content on that row.
+PROMPT_RE_END = re.compile(r"(?:[❯›〉]|│\s*>\s*│?)\s*$")
+PROMPT_RE_LINE = re.compile(r"^\s*[❯›〉]\s*$")
 
 # Markers that indicate Claude is ACTIVELY working.
 #
@@ -91,8 +98,13 @@ def is_idle(
     clean = _strip_ansi(tail_output)
     lines = [ln.rstrip() for ln in clean.splitlines() if ln.strip()]
 
-    # signal 1: empty prompt in last 5 non-empty lines
-    has_empty_prompt = any(PROMPT_RE.search(ln) for ln in lines[-5:])
+    # signal 1: empty prompt in last 10 non-empty lines (wider window so
+    # trailing status-bar lines after the prompt don't push it out of view)
+    tail_lines_for_prompt = lines[-10:]
+    has_empty_prompt = any(
+        PROMPT_RE_END.search(ln) or PROMPT_RE_LINE.search(ln)
+        for ln in tail_lines_for_prompt
+    )
 
     # signal 2: no busy marker in the LAST FEW lines (not whole tail),
     # so stale indicators from earlier answers don't keep us stuck.

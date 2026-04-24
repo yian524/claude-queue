@@ -25,7 +25,12 @@ class Config:
     # --- idle detection knobs ---
     debounce_s: float = 0.6          # pane must be stable this long to count as idle
     poll_interval_s: float = 0.3     # monitor wake frequency
-    tail_chars: int = 4000           # how many trailing PTY bytes to inspect
+    # Tail capacity: Claude's Ink TUI emits a LOT of ANSI per frame (cursor
+    # positioning, status line refreshes, box-drawing redraws). 4 KB of
+    # raw bytes is often < 40 rendered lines after ANSI stripping, which
+    # can let the prompt line scroll out of our window on long answers.
+    # 16 KB keeps the prompt reliably in view.
+    tail_chars: int = 16000
     prompt_no_match_warn_s: float = 30.0  # degrade warning threshold
 
     # --- terminal relay knobs ---
