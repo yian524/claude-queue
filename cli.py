@@ -101,9 +101,9 @@ def cmd_start(args: argparse.Namespace) -> int:
     cmd = args.cmd or "claude"
     if args.dry_run:
         cmd = "cmd.exe" if os.name == "nt" else "sh"
-        print(f"[claude-q] --dry-run: target command is {cmd}")
+        print(f"[claude -q] --dry-run: target command is {cmd}")
     if not args.dry_run and shutil.which(cmd) is None:
-        print(f"[claude-q] ERROR: {cmd!r} not found in PATH. Install it or use --cmd.",
+        print(f"[claude -q] ERROR: {cmd!r} not found in PATH. Install it or use --cmd.",
               file=sys.stderr)
         return 2
 
@@ -111,11 +111,11 @@ def cmd_start(args: argparse.Namespace) -> int:
     sid = session.new_session_id()
     run_dir = session.session_dir(sid)
     session.set_active(sid)
-    print(f"[claude-q] session {sid}")
-    print(f"[claude-q] run dir: {run_dir}")
-    print(f"[claude-q] queue:   {run_dir / 'queue.jsonl'}")
-    print("[claude-q] toggle:  Ctrl+Q  (direct <-> queue)")
-    print("[claude-q] starting claude... (type normally)")
+    print(f"[claude -q] session {sid}")
+    print(f"[claude -q] run dir: {run_dir}")
+    print(f"[claude -q] queue:   {run_dir / 'queue.jsonl'}")
+    print("[claude -q] toggle:  Ctrl+Q  (direct <-> queue)")
+    print("[claude -q] starting claude... (type normally)")
     print("-" * 72)
 
     # resume prompt: existing pending entries from a previous abandoned session?
@@ -132,7 +132,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         rows = max(10, real_size.lines)
     except Exception:
         cols, rows = cfg.pty_default_cols, cfg.pty_default_rows
-    print(f"[claude-q] terminal size: {cols}x{rows}")
+    print(f"[claude -q] terminal size: {cols}x{rows}")
 
     spec = pty_host.SpawnSpec(cmd=cmd, cols=cols, rows=rows)
     host = pty_host.PtyHost(spec, tail_chars=cfg.tail_chars)
@@ -258,7 +258,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     try:
         while host.is_alive():
             if stop_sentinel.exists():
-                print("\n[claude-q] STOP sentinel detected; terminating.")
+                print("\n[claude -q] STOP sentinel detected; terminating.")
                 break
             time.sleep(0.2)
     except KeyboardInterrupt:
@@ -280,7 +280,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         host.terminate(force=True)
         # don't clear ACTIVE so `claude-q status` after exit still works
         set_window_title("claude")
-        print("\n[claude-q] session ended.")
+        print("\n[claude -q] session ended.")
     return exit_code
 
 
@@ -289,7 +289,7 @@ def cmd_start(args: argparse.Namespace) -> int:
 def cmd_add(args: argparse.Namespace) -> int:
     text = " ".join(args.text).strip()
     if not text:
-        print("[claude-q] ERROR: empty message", file=sys.stderr)
+        print("[claude -q] ERROR: empty message", file=sys.stderr)
         return 2
     qpath = _resolve_target_queue(getattr(args, "session", None))
     eid = queue_store.push(qpath, text, source="claude-q-add")
@@ -327,17 +327,17 @@ def cmd_stop(args: argparse.Namespace) -> int:
     """
     sid = session.active_session()
     if not sid:
-        print("[claude-q] no active session")
+        print("[claude -q] no active session")
         return 1
     st = session.read_session(sid)
     if st is None:
-        print("[claude-q] ERROR: session.json missing", file=sys.stderr)
+        print("[claude -q] ERROR: session.json missing", file=sys.stderr)
         return 2
 
     run_dir = session.session_dir(sid)
     sentinel = run_dir / "STOP"
     sentinel.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"), encoding="utf-8")
-    print(f"[claude-q] STOP sentinel written for pid {st.pid}")
+    print(f"[claude -q] STOP sentinel written for pid {st.pid}")
 
     # also try a best-effort hard kill in case the process is hung
     if os.name == "nt":
@@ -348,16 +348,16 @@ def cmd_stop(args: argparse.Namespace) -> int:
                 capture_output=True, text=True, timeout=5,
             )
             if r.returncode == 0:
-                print("[claude-q] taskkill sent")
+                print("[claude -q] taskkill sent")
         except Exception:
             pass
     else:
         try:
             os.kill(st.pid, signal.SIGTERM)
         except ProcessLookupError:
-            print("[claude-q] process already gone")
+            print("[claude -q] process already gone")
         except Exception as e:
-            print(f"[claude-q] os.kill failed: {e}", file=sys.stderr)
+            print(f"[claude -q] os.kill failed: {e}", file=sys.stderr)
     return 0
 
 
@@ -368,7 +368,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     if getattr(args, "all_sessions", False):
         sids = session.list_sessions()
         if not sids:
-            print("[claude-q] no sessions found")
+            print("[claude -q] no sessions found")
             return 0
         total_entries = 0
         total_pending = 0
@@ -391,7 +391,7 @@ def cmd_list(args: argparse.Namespace) -> int:
                 print(f"      ... +{len(rows) - 10} more")
             total_entries += len(entries)
             total_pending += len(pending)
-        print(f"[claude-q] sessions={len(sids)} total={total_entries} "
+        print(f"[claude -q] sessions={len(sids)} total={total_entries} "
               f"pending={total_pending}")
         return 0
 
@@ -400,7 +400,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     entries = queue_store.list_all(qpath)
     pending = [e for e in entries if e.status == queue_store.STATUS_PENDING]
     rows = entries if args.all else pending
-    print(f"[claude-q] total={len(entries)} pending={len(pending)}")
+    print(f"[claude -q] total={len(entries)} pending={len(pending)}")
     for e in rows:
         preview = e.text if len(e.text) <= 80 else e.text[:77] + "..."
         sched = f" @{e.dispatch_at}" if e.dispatch_at else ""
@@ -436,9 +436,9 @@ def cmd_sessions(args: argparse.Namespace) -> int:
     sids = session.list_sessions()
     active = session.active_session()
     if not sids:
-        print("[claude-q] no sessions found")
+        print("[claude -q] no sessions found")
         return 0
-    print(f"[claude-q] {len(sids)} session(s):")
+    print(f"[claude -q] {len(sids)} session(s):")
     for sid in sids:
         st = session.read_session(sid)
         qpath = session.session_dir(sid) / "queue.jsonl"
@@ -472,7 +472,7 @@ def cmd_scheduler(args: argparse.Namespace) -> int:
         # for manual testing
         import scheduler_tick
         return scheduler_tick.main()
-    print(f"[claude-q] unknown action: {action}", file=sys.stderr)
+    print(f"[claude -q] unknown action: {action}", file=sys.stderr)
     return 2
 
 
@@ -485,11 +485,11 @@ def _scheduler_install() -> int:
                    / ".claude" / "scripts" / "claude-queue"
                    / "scheduler_tick.py")
     if not python_exe.exists():
-        print(f"[claude-q] ERROR: venv python not found at {python_exe}",
+        print(f"[claude -q] ERROR: venv python not found at {python_exe}",
               file=sys.stderr)
         return 2
     if not tick_script.exists():
-        print(f"[claude-q] ERROR: scheduler_tick.py not found at {tick_script}",
+        print(f"[claude -q] ERROR: scheduler_tick.py not found at {tick_script}",
               file=sys.stderr)
         return 2
     # Build the command line. schtasks needs everything in one TR string.
@@ -510,12 +510,12 @@ def _scheduler_install() -> int:
         capture_output=True, text=True,
     )
     if result.returncode == 0:
-        print(f"[claude-q] scheduled task '{_SCHED_TASK_NAME}' installed.")
+        print(f"[claude -q] scheduled task '{_SCHED_TASK_NAME}' installed.")
         print("           Runs every 1 minute as your user account.")
         print("           Check status: `claude -q scheduler status`")
         print("           Remove:       `claude -q scheduler uninstall`")
         return 0
-    print(f"[claude-q] schtasks /Create failed (rc={result.returncode}):",
+    print(f"[claude -q] schtasks /Create failed (rc={result.returncode}):",
           file=sys.stderr)
     print(result.stderr or result.stdout, file=sys.stderr)
     return 2
@@ -528,9 +528,9 @@ def _scheduler_uninstall() -> int:
         capture_output=True, text=True,
     )
     if result.returncode == 0:
-        print(f"[claude-q] scheduled task '{_SCHED_TASK_NAME}' removed.")
+        print(f"[claude -q] scheduled task '{_SCHED_TASK_NAME}' removed.")
         return 0
-    print(f"[claude-q] schtasks /Delete: task not installed or failed "
+    print(f"[claude -q] schtasks /Delete: task not installed or failed "
           f"(rc={result.returncode})", file=sys.stderr)
     if result.stderr:
         print(result.stderr, file=sys.stderr)
@@ -544,7 +544,7 @@ def _scheduler_status() -> int:
         capture_output=True, text=True,
     )
     if result.returncode != 0:
-        print("[claude-q] scheduled task NOT installed.")
+        print("[claude -q] scheduled task NOT installed.")
         print("           Install with: `claude -q scheduler install`")
         return 1
     # print the key lines only for cleanliness
@@ -571,7 +571,7 @@ def _scheduler_status() -> int:
 # ------------------------- subcommand: doctor -------------------------
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    print("[claude-q] doctor")
+    print("[claude -q] doctor")
     print("-" * 56)
 
     # 1. platform
@@ -659,7 +659,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(f"  active session:    {sid or '(none)'}")
 
     print("-" * 56)
-    print("[claude-q] doctor: all checks passed")
+    print("[claude -q] doctor: all checks passed")
     return 0
 
 
@@ -667,7 +667,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="claude-q",
+        prog="claude -q",
         description="Type-ahead FIFO queue wrapper for Claude Code CLI "
                     "(Windows, pywinpty-based)",
     )
@@ -746,7 +746,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except RuntimeError as e:
-        print(f"[claude-q] {e}", file=sys.stderr)
+        print(f"[claude -q] {e}", file=sys.stderr)
         return 2
 
 

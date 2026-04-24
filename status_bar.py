@@ -97,7 +97,7 @@ class StatusBar:
 
     @staticmethod
     def _format_title(p: dict) -> str:
-        parts = ["claude-q"]
+        parts = ["claude -q"]
         q = p.get("queue_len", 0)
         parts.append(f"queue:{q}")
         mode = p.get("mode", "direct")

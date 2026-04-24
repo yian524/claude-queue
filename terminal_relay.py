@@ -136,7 +136,7 @@ class TerminalRelay:
                     self._handle_key(k)
         except Exception as e:
             self._debug(f"relay loop crashed: {type(e).__name__}: {e}")
-            sys.stdout.write(f"\r\n\x1b[31m[claude-q] relay loop crashed: {e}\x1b[0m\r\n")
+            sys.stdout.write(f"\r\n\x1b[31m[claude -q] relay loop crashed: {e}\x1b[0m\r\n")
             sys.stdout.flush()
 
     def _handle_key(self, k) -> None:
@@ -341,7 +341,7 @@ class TerminalRelay:
                 if isinstance(parsed, _slash.ForceSendRequest):
                     self._send_to_pty((parsed.text.rstrip("\r\n") + "\r")
                                       .encode("utf-8"))
-                    self._set_title(f"claude-q /now sent: "
+                    self._set_title(f"claude -q /now sent: "
                                     f"{parsed.text[:40]!r}")
                 elif isinstance(parsed, _slash.QueueRequest):
                     eid = queue_store.push(
@@ -356,7 +356,7 @@ class TerminalRelay:
                     tag = "priority" if parsed.priority > 0 else "queued"
                     n = queue_store.pending_len(self.queue_path)
                     self._set_title(
-                        f"claude-q {tag} ({when}) pending:{n} - "
+                        f"claude -q {tag} ({when}) pending:{n} - "
                         f"{parsed.text[:40]!r}"
                     )
                 elif raw_text:
@@ -364,12 +364,12 @@ class TerminalRelay:
                                            source="queue-pane")
                     n = queue_store.pending_len(self.queue_path)
                     self._set_title(
-                        f"claude-q queued pending:{n} - {raw_text[:40]!r}"
+                        f"claude -q queued pending:{n} - {raw_text[:40]!r}"
                     )
             except Exception as e:
                 # Errors DO go to main screen because user must see them
                 sys.stdout.write(
-                    f"\r\n\x1b[31m[claude-q] push failed: {e}\x1b[0m\r\n"
+                    f"\r\n\x1b[31m[claude -q] push failed: {e}\x1b[0m\r\n"
                 )
                 sys.stdout.flush()
 
@@ -495,7 +495,7 @@ class TerminalRelay:
 
         # top banner (yellow)
         add("\x1b[1;33m╔" + "═" * (cols - 2) + "╗\x1b[0m")
-        title = "  [claude-q]  QUEUE INPUT"
+        title = "  [claude -q]  QUEUE INPUT"
         right = f"session: {sid}  "
         gap = cols - 2 - len(title) - len(right)
         add("\x1b[1;33m║\x1b[0m" + title + " " * max(0, gap) + right
@@ -663,7 +663,7 @@ class TerminalRelay:
         try:
             self.pty_write(data)
         except Exception as e:
-            sys.stdout.write(f"\r\n\x1b[31m[claude-q] pty write error: {e}\x1b[0m\r\n")
+            sys.stdout.write(f"\r\n\x1b[31m[claude -q] pty write error: {e}\x1b[0m\r\n")
             sys.stdout.flush()
 
     def _dispatch_hint(self, pending: list) -> str:
