@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+
+# venv (let users create their own)
+.venv/
+venv/
+env/
+
+# runtime state (per-user, not versioned)
+# NOTE: we DO version the scripts/ directory but not runtime data
+# (the runtime data goes to ~/.claude/run/claude-q/, outside this repo)
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# project-specific debug logs
+*.log
+relay_debug.log
+monitor.log
