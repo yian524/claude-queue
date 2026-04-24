@@ -129,15 +129,59 @@ to drop into the queue UI.
 | Command | Purpose |
 |---|---|
 | `claude -q` | Start the wrapped session |
-| `claude-q start --cmd <path>` | Wrap a different executable (default: `claude`) |
-| `claude-q start --dry-run` | Wrap `cmd.exe` for smoke-testing |
-| `claude -q add "<text>"` | Append to the active queue from another terminal |
-| `claude-q list [--all]` | Show pending (or all) queue entries |
-| `claude-q drop <id>` | Drop one pending entry |
-| `claude-q clear` | Drop every pending entry |
-| `claude-q status` | JSON snapshot (queue length, idle state, mode) |
-| `claude-q stop` | Terminate the active session |
-| `claude-q doctor` | Environment sanity check |
+| `claude -q start --cmd <path>` | Wrap a different executable (default: `claude`) |
+| `claude -q start --dry-run` | Wrap `cmd.exe` for smoke-testing |
+| `claude -q add "<text>" [--session SID]` | Append to a session's queue |
+| `claude -q list [--all] [--all-sessions] [--session SID]` | Show queue entries |
+| `claude -q drop <id> [--session SID]` | Drop one pending entry |
+| `claude -q clear [--session SID]` | Drop every pending entry |
+| `claude -q sessions` | List every known session with pending counts |
+| `claude -q status` | JSON snapshot (queue length, idle state, mode) |
+| `claude -q stop` | Terminate the active session |
+| `claude -q scheduler install\|uninstall\|status\|run-once` | Windows-Task-based sweep daemon |
+| `claude -q doctor` | Environment sanity check |
+
+## Slash commands (inside the queue-mode UI)
+
+When you're in queue mode (triggered by `Ctrl+Q`) and your input starts
+with `/`, an autocomplete dropdown appears. Navigate with `↑↓`, `Tab`
+or `Enter` picks the template, `Esc` closes the dropdown.
+
+| Command | Effect |
+|---|---|
+| `/wait <dur> <msg>` | Dispatch after `<dur>` (e.g. `30s`, `5m`, `1h30m`, `2h15m30s`) |
+| `/at <time> <msg>` | Dispatch at `<time>` (`14:30`, `14:30:00`, or `YYYY-MM-DD HH:MM`) |
+| `/priority <msg>` | Push to the front of the queue (priority 100) |
+| `/now <msg>` | ⚠️ Send directly to Claude, bypass idle wait (may interrupt) |
+| `/cancel` | Discard input, leave queue mode |
+| `/help` | Show this command list |
+
+Plain text (no leading `/`) behaves as before: queued, dispatched ASAP
+when Claude idles.
+
+## Persistent scheduling (optional)
+
+By default, scheduled entries (`/wait` / `/at`) only dispatch while a
+`claude -q` session is running — the monitor thread dies with the CLI.
+The queue file itself persists on disk, so entries are not lost, but
+nothing picks them up until you next run `claude -q`.
+
+If you want a Windows-native watchdog that notices overdue entries even
+when no session is open, opt in with:
+
+```powershell
+claude -q scheduler install
+```
+
+This registers a Scheduled Task that runs every 1 minute, scans every
+session queue, logs a summary to
+`~/.claude/run/claude-q/_scheduler_tick.log`, and pops a Windows
+notification (via the built-in `msg` command) when there are overdue
+entries but no active session — a nudge to open `claude -q` again.
+
+The daemon **does not** force-dispatch without a live Claude session
+(you need a running PTY for that). It's a visibility/notification
+layer. Remove with `claude -q scheduler uninstall`.
 
 ---
 
@@ -192,20 +236,26 @@ to drop into the queue UI.
 
 ```
 claude-queue/
-├── LICENSE
-├── README.md
-├── __init__.py
+├── LICENSE / README / CONTRIBUTING / CHANGELOG
 ├── cli.py                 # entrypoint (argparse dispatcher)
 ├── session.py             # session id + paths + ACTIVE pointer
 ├── config.py              # defaults + optional TOML override
-├── queue_store.py         # atomic JSONL FIFO
+├── queue_store.py         # atomic JSONL FIFO with dispatch_at/priority
+├── scheduler.py           # duration / absolute-time parser
+├── slash_commands.py      # /wait /at /priority /now /cancel /help parser
 ├── pty_host.py            # pywinpty wrapper
 ├── win_console_input.py   # ReadConsoleInputW binding
 ├── idle_detector.py       # three-signal AND idle detection
-├── monitor.py             # background dispatcher thread
-├── terminal_relay.py      # keyboard <-> PTY bridge + queue UI
+├── monitor.py             # background dispatcher thread (in-process)
+├── terminal_relay.py      # keyboard <-> PTY bridge + alt-screen queue UI
 ├── status_bar.py          # window-title status reporter
+├── scheduler_tick.py      # standalone sweep, called by Windows Task Scheduler
 ├── diag_keys.py           # standalone key-read diagnostic
+├── bin/
+│   ├── claude.cmd            # cmd.exe shim (backup install path)
+│   ├── claude-profile.ps1    # PowerShell function to append to $PROFILE
+│   ├── claude-q.cmd          # legacy alias
+│   └── claude-q-add.cmd      # legacy alias
 └── tests/
     └── test_e2e_smoke.py  # pytest end-to-end suite
 ```

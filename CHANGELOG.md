@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-24
+
+### Added
+- **Scheduling: `/wait <duration>` and `/at <time>`.** Queue a message
+  to be dispatched only after a delay (`/wait 5m`, `/wait 1h30m`,
+  `/wait 90s`) or at an absolute time (`/at 14:30`,
+  `/at 2026-04-25 14:30`). Monitor honours scheduling and
+  priority.
+- **Slash commands with autocomplete.** When you type `/` in the queue
+  UI, a dropdown shows matching commands. `↑↓` navigate, `Tab`/`Enter`
+  picks the template, `Esc` closes. Commands:
+  - `/wait <dur> <msg>` — delayed dispatch
+  - `/at <time> <msg>` — absolute-time dispatch
+  - `/priority <msg>` — jump ahead of normal queue entries
+  - `/now <msg>` — bypass idle check, dispatch immediately (WARNING)
+  - `/cancel` — discard input, back to direct mode
+  - `/help` — show command reference
+- **Cross-session support.** Every `add`/`list`/`drop`/`clear` now
+  accepts `--session <id-or-prefix>`. New `claude -q sessions` lists
+  all known sessions with their pending counts; `list --all-sessions`
+  prints queues for every session at once.
+- **Windows Scheduled Task daemon (opt-in).** `claude -q scheduler
+  install` registers a per-minute Windows task that sweeps all session
+  queues for overdue entries and shows a Windows notification when a
+  scheduled dispatch is ready but no CLI is running. `uninstall` /
+  `status` / `run-once` round out the interface.
+
 ### Changed
 - **Command syntax: `claude-q` → `claude -q`.** Two install paths:
   - **PowerShell users (recommended):** drop a `claude` function into
@@ -15,12 +42,19 @@ All notable changes to this project will be documented in this file.
     default prefers `.exe` over `.cmd`, so PATH ordering alone may not
     be enough — the PowerShell profile route is more reliable.)
 - `claude-q` / `claude-q-add` remain as backward-compatible aliases.
+- `list` output shows `@<dispatch-time>` for scheduled entries and `★`
+  for priority entries.
+- `monitor.snapshot()` now also reports `ready_len` (entries whose
+  schedule has matured) in addition to `queue_len`.
 
 ### Fixed
 - `Ctrl+Enter` / `Shift+Enter` / `Alt+Enter` now insert a newline in the
   input box instead of submitting. Plain `Enter` still submits.
 - Queue UI cursor now parks inside the input box instead of below the
   box after rendering.
+- `idle_detector` no longer falsely marks Claude as busy when a past-
+  tense completion marker (`✻ Sautéed for 52s`) is on screen — busy
+  detection now requires a spinner+ellipsis combo.
 
 ## [0.2.0] - 2026-04-24
 
