@@ -5,11 +5,15 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Changed
-- **Command syntax: `claude-q` → `claude -q`.** Added a `claude.cmd`
-  shim that sits earlier on `PATH` than the real `claude.exe` and
-  transparently forwards anything without a `-q` first argument to the
-  real binary. Now you type `claude -q` like any other subcommand
-  instead of remembering a separate binary name.
+- **Command syntax: `claude-q` → `claude -q`.** Two install paths:
+  - **PowerShell users (recommended):** drop a `claude` function into
+    `$PROFILE` (ready-made at `bin/claude-profile.ps1`). PowerShell
+    functions take priority over `$PATH`-resolved executables, so
+    routing is deterministic regardless of PATH ordering.
+  - **cmd.exe users:** use `bin/claude.cmd` shim placed earlier in PATH
+    than the real `claude.exe`'s directory. (Note: Windows' PATHEXT
+    default prefers `.exe` over `.cmd`, so PATH ordering alone may not
+    be enough — the PowerShell profile route is more reliable.)
 - `claude-q` / `claude-q-add` remain as backward-compatible aliases.
 
 ### Fixed

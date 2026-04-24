@@ -56,22 +56,29 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pip install pywinpty prompt_toolkit pytest
 ```
 
-Add the `bin/` directory to your `PATH` so the wrapper works globally:
+Make the `claude -q ...` syntax work in your PowerShell sessions by
+adding a function to your PowerShell `$PROFILE`:
 
 ```powershell
-[Environment]::SetEnvironmentVariable(
-  "Path",
-  "$env:USERPROFILE\.claude\bin;" + [Environment]::GetEnvironmentVariable("Path", "User"),
-  "User")
+# Create PROFILE file if it doesn't exist yet
+New-Item -Path $PROFILE -ItemType File -Force
+
+# Append the claude wrapper function (this repo ships a ready-made one)
+Get-Content "$env:USERPROFILE\.claude\scripts\claude-queue\bin\claude-profile.ps1" |
+  Add-Content -Path $PROFILE
 ```
 
-Copy the shims from this repo's `bin/` directory to
-`~/.claude/bin/`. The key file is `claude.cmd` — a drop-in replacement
-for the stock `claude` command that transparently forwards anything
-without `-q` to the real `claude.exe`, and routes `claude -q ...` to the
-wrapper. `~/.claude/bin/` must come before the directory containing
-the real `claude.exe` on your PATH (it does by default after the
-command above).
+This works because **PowerShell functions take priority over anything
+on `$PATH`**, so the function unconditionally catches every `claude ...`
+invocation and decides whether to route to the wrapper (`-q`) or to the
+real `claude.exe` (anything else).
+
+For `cmd.exe` users or if you prefer a directory-based shim, the repo
+also ships `bin/claude.cmd` and `bin/claude-q.cmd`. Place them in a
+directory that appears on your `PATH` **before** the real
+`claude.exe`'s directory. (On PowerShell the function profile route is
+more reliable because PATHEXT preference quirks can cause `.exe` to
+win over `.cmd` even when the `.cmd`'s directory is listed first.)
 
 ### Verify
 
