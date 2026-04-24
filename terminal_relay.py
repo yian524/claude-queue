@@ -32,6 +32,8 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import queue_store
+import scheduler as _scheduler
+import slash_commands as _slash
 
 # ANSI alt-screen sequences
 # - ?1049h: switch to alt screen + save cursor
@@ -265,8 +267,15 @@ class TerminalRelay:
             pass
         self._render_queue_ui()
 
-    def _exit_queue_mode(self, push: bool) -> None:
-        text = "".join(self._queue_buf).strip() if push else ""
+    def _exit_queue_mode(self, push: bool, parsed=None) -> None:
+        """Exit queue mode and act on parsed command (if any).
+
+        If `parsed` is provided and is a QueueRequest, it carries the
+        text + dispatch_at + priority to push. If ForceSendRequest,
+        write directly to PTY bypassing queue. Otherwise (push=True
+        without parsed) falls back to plain-text push.
+        """
+        raw_text = "".join(self._queue_buf).strip() if push else ""
         self._queue_buf = []
         # Leave alt screen first — terminal restores Claude's UI as-was.
         try:
@@ -276,18 +285,45 @@ class TerminalRelay:
             pass
         self._mode = "direct"
 
-        # Now print a short inline confirmation on the main screen.
-        if push and text:
+        # Act on the parsed command (or fall back to plain push)
+        if push:
             try:
-                eid = queue_store.push(self.queue_path, text, source="queue-pane")
-                sys.stdout.write(
-                    f"\r\n\x1b[32m[claude-q] queued id={eid[:15]} "
-                    f"preview={text[:60]!r}\x1b[0m\r\n"
-                )
+                if isinstance(parsed, _slash.ForceSendRequest):
+                    # /now - write directly to PTY, bypass queue entirely
+                    self._send_to_pty((parsed.text.rstrip("\r\n") + "\r")
+                                      .encode("utf-8"))
+                    sys.stdout.write(
+                        f"\r\n\x1b[33m[claude-q] /now: sent directly "
+                        f"(may interrupt Claude)\x1b[0m\r\n"
+                    )
+                elif isinstance(parsed, _slash.QueueRequest):
+                    eid = queue_store.push(
+                        self.queue_path,
+                        parsed.text,
+                        source="queue-pane",
+                        dispatch_at=parsed.dispatch_at,
+                        priority=parsed.priority,
+                    )
+                    when = (_scheduler.humanize_delta(parsed.dispatch_at)
+                            if parsed.dispatch_at else "ASAP on idle")
+                    tag = "priority" if parsed.priority > 0 else "queued"
+                    sys.stdout.write(
+                        f"\r\n\x1b[32m[claude-q] {tag} id={eid[:15]} "
+                        f"({when}) preview={parsed.text[:60]!r}\x1b[0m\r\n"
+                    )
+                elif raw_text:
+                    # fallback (shouldn't happen now, but safe)
+                    eid = queue_store.push(self.queue_path, raw_text,
+                                           source="queue-pane")
+                    sys.stdout.write(
+                        f"\r\n\x1b[32m[claude-q] queued id={eid[:15]} "
+                        f"preview={raw_text[:60]!r}\x1b[0m\r\n"
+                    )
                 sys.stdout.flush()
             except Exception as e:
                 sys.stdout.write(f"\r\n\x1b[31m[claude-q] push failed: {e}\x1b[0m\r\n")
                 sys.stdout.flush()
+
         # resume Claude->stdout passthrough AFTER alt screen exit so
         # buffered bytes reach the restored main screen cleanly.
         if self.on_mode_change:
@@ -297,12 +333,34 @@ class TerminalRelay:
                 pass
 
     def _commit_queue_input(self) -> None:
-        text = "".join(self._queue_buf).strip()
-        if not text:
-            # empty input: stay in queue mode, redraw so user sees input area
-            self._render_queue_ui(note="empty input; please type something or Esc to cancel")
+        raw = "".join(self._queue_buf).strip()
+        if not raw:
+            self._render_queue_ui(
+                note="empty input; please type something or Esc to cancel"
+            )
             return
-        self._exit_queue_mode(push=True)
+
+        # parse for /slash commands
+        parsed = _slash.parse(raw)
+
+        if isinstance(parsed, _slash.ParseError):
+            self._render_queue_ui(note=parsed.message)
+            return
+        if isinstance(parsed, _slash.HelpRequest):
+            self._render_queue_ui(note=self._help_text())
+            return
+        if isinstance(parsed, _slash.CancelRequest):
+            self._cancel_queue_input()
+            return
+
+        # QueueRequest or ForceSendRequest: exit mode and push/send
+        self._exit_queue_mode(push=True, parsed=parsed)
+
+    @staticmethod
+    def _help_text() -> str:
+        """One-line help shown in queue UI when user types /help."""
+        return ("/wait <dur> msg | /at <time> msg | /priority msg | "
+                "/now msg | /cancel | /help")
 
     def _cancel_queue_input(self, silent: bool = False) -> None:
         self._exit_queue_mode(push=False)
