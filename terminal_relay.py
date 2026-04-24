@@ -148,11 +148,25 @@ class TerminalRelay:
             self._cancel_queue_input()
             return
 
-        # ---- Enter handling (VK_RETURN covers both IME-Enter and plain Enter) ----
+        # ---- Enter family handling ----
+        # - Plain Enter  -> submit (send \r)
+        # - Ctrl+Enter   -> insert newline in input (send \n)
+        # - Shift+Enter  -> same as Ctrl+Enter (common Ink TUI shortcut)
+        # - Alt+Enter    -> same as Ctrl+Enter
+        # In queue mode we only treat plain Enter as "commit"; modifier+Enter
+        # inserts a literal newline into the queue buffer.
         if k.vkey == VK_RETURN:
+            is_plain = not (k.ctrl or k.shift or k.alt)
             if self._mode == "queue":
-                self._commit_queue_input()
-            else:
+                if is_plain:
+                    self._commit_queue_input()
+                else:
+                    # newline inside queue buffer
+                    self._queue_buf.append("\n")
+                    self._update_input_line()
+                return
+            # direct mode
+            if is_plain:
                 payload = os.environ.get("CLAUDE_Q_ENTER", "cr").lower()
                 if payload == "lf":
                     data = b"\n"
@@ -162,6 +176,11 @@ class TerminalRelay:
                     data = b"\r"
                 self._debug(f"ENTER sent={data!r}")
                 self._send_to_pty(data)
+            else:
+                # Ctrl/Shift/Alt + Enter -> literal newline
+                self._debug(f"NEWLINE (modifier+Enter) sent=b'\\n' "
+                            f"ctrl={k.ctrl} shift={k.shift} alt={k.alt}")
+                self._send_to_pty(b"\n")
             return
 
         # ---- Arrow/function keys etc. (VT sequence precomputed) ----
