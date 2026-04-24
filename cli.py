@@ -149,15 +149,31 @@ def cmd_start(args: argparse.Namespace) -> int:
     import threading as _threading
     pause_lock = _threading.Lock()
     paused_flag = {"v": False}
-    paused_buf: list[bytes] = []
 
     def _on_data(s: str) -> None:
-        data = s.encode("utf-8", errors="replace")
+        """PTY byte callback.
+
+        Behaviour split by whether we're displaying the queue UI (paused):
+          - Not paused: write to stdout for live Claude passthrough.
+          - Paused (user in queue-mode alt screen): DISCARD entirely.
+            `pty_host` already appended to tail_buf before calling us, so
+            idle detection still sees current state. Discarding avoids
+            two previously-tried failure modes:
+              * naive replay leaves ghost frames on top of each other
+                ("two input boxes" bug)
+              * clear-then-replay pushes stale content into scrollback,
+                accumulating phantom empty-`>` lines across multiple
+                Ctrl+Q cycles.
+            On alt-screen exit, the terminal's own `\\x1b[?1049l`
+            restores the pre-alt main screen. Claude's next frame (from
+            a user keystroke or a monitor-dispatched queue entry) will
+            redraw the TUI cleanly from scratch.
+        """
         try:
             with pause_lock:
                 if paused_flag["v"]:
-                    paused_buf.append(data)
-                    return
+                    return  # discard; tail_buf already has it for detection
+            data = s.encode("utf-8", errors="replace")
             if stdout_buffer is not None:
                 stdout_buffer.write(data)
                 stdout_buffer.flush()
@@ -172,29 +188,11 @@ def cmd_start(args: argparse.Namespace) -> int:
             paused_flag["v"] = True
 
     def _resume_output() -> None:
+        # No replay. Terminal's native alt-screen exit restored the main
+        # screen to its pre-alt state; Claude's next frame will redraw
+        # current state cleanly. See _on_data for rationale.
         with pause_lock:
             paused_flag["v"] = False
-            if paused_buf and stdout_buffer is not None:
-                try:
-                    # Each buffered chunk is a full-screen redraw frame from
-                    # Claude's Ink TUI. Replaying them all naively leaves
-                    # residue from earlier frames because later frames may
-                    # not cover the same cells. Keep only the LAST ~16 KB
-                    # — that's virtually guaranteed to contain a complete
-                    # frame (Ink's frames are typically < 8 KB). Then
-                    # clear the visible screen before writing so the last
-                    # frame draws on a clean slate and no "double input
-                    # box" ghost remains.
-                    combined = b"".join(paused_buf)
-                    MAX_REPLAY_BYTES = 16 * 1024
-                    if len(combined) > MAX_REPLAY_BYTES:
-                        combined = combined[-MAX_REPLAY_BYTES:]
-                    stdout_buffer.write(b"\x1b[H\x1b[2J")  # home + clear visible
-                    stdout_buffer.write(combined)
-                    stdout_buffer.flush()
-                except Exception:
-                    pass
-                paused_buf.clear()
 
     host.set_on_data(_on_data)
     host.spawn()

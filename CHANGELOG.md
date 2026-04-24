@@ -4,7 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [0.3.6] - 2026-04-24
+## [0.3.8] - 2026-04-24
+
+### Fixed
+- **Phantom empty-`>` prompts accumulating across Ctrl+Q cycles.**
+  Final root cause: v0.3.4's clear-then-replay strategy (`\x1b[H\x1b[2J`
+  before flushing `paused_buf`) pushed the cleared content into the
+  terminal's scrollback on every Ctrl+Q exit. After a few cycles the
+  scrollback looked like:
+  ```
+  > <empty>
+  > <user msg 1>
+  <response 1>
+  > <empty>        <-- phantom, from v0.3.4 clear push
+  > <user msg 2>
+  <response 2>
+  > <empty>        <-- another phantom
+  ```
+  **New strategy: just drop buffered PTY bytes during alt-screen mode.**
+  On exit, the terminal's native `\x1b[?1049l` restores the pre-alt
+  main screen. Claude's next frame (from a keystroke or dispatched
+  queue entry) redraws the full TUI cleanly from scratch. Trade-off:
+  if Claude was mid-streaming when user entered alt-screen, that
+  output is not re-displayed, but it remains in Claude's internal
+  conversation state and will be included in subsequent responses.
+
+## [0.3.7] - 2026-04-24
 
 ### Added
 - Queue-mode UI now shows a **dispatch hint line** explaining why the
