@@ -1,166 +1,272 @@
-# claude-q — Type-Ahead FIFO Queue Wrapper for Claude Code CLI
+# claude-q
 
-Wrap Claude Code in a pseudo-terminal so you can **type the next question
-while Claude is still answering the previous one**. The wrapper catches
-your new input into a FIFO queue and auto-sends it the moment Claude
-returns to an empty prompt.
+> Type-ahead FIFO queue wrapper for Claude Code CLI on Windows.
+> Press `Ctrl+Q` mid-response to queue a follow-up question without
+> interrupting Claude's current work — it's auto-dispatched when Claude
+> returns to idle.
 
-- **zero tmux dependency** — pure Python + `pywinpty`
-- **one dedicated venv** at `~/.claude/scripts/claude-queue/.venv` (does not
-  touch your thesis venv or global Python)
-- **transparent passthrough** — 95 % of the time you use it, it feels
-  identical to plain `claude`; the difference is when `Ctrl+Q` is pressed
+![license](https://img.shields.io/badge/license-MIT-blue)
+![platform](https://img.shields.io/badge/platform-Windows%2010%2B-lightgrey)
+![python](https://img.shields.io/badge/python-3.10%2B-blue)
+![status](https://img.shields.io/badge/status-beta-orange)
 
 ---
 
-## Install summary
+## The problem
 
-Already done on this machine. For a fresh install:
+You're chatting with `claude` in the terminal. Claude is writing a long
+answer and you suddenly remember a follow-up question. In native Claude
+Code:
 
-```bat
-cd %USERPROFILE%\.claude\scripts\claude-queue
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install pywinpty prompt_toolkit pytest
-```
+* Pressing Enter while Claude is streaming **may interrupt** the current
+  answer (behaviour varies between versions — see
+  [anthropics/claude-code#50246](https://github.com/anthropics/claude-code/issues/50246),
+  [#34835](https://github.com/anthropics/claude-code/issues/34835),
+  [#33323](https://github.com/anthropics/claude-code/issues/33323)).
+* Claude Code v2.1.x does ship a native queue, but its UI still mixes the
+  queued text into the active response area, causing visual confusion and
+  occasional loss.
 
-Add `%USERPROFILE%\.claude\bin` to your PATH if you want to call `claude-q`
-directly from any shell.
+`claude-q` solves this by wrapping Claude in a PTY and exposing a second,
+completely isolated queue channel. Pressing `Ctrl+Q` pops up a dedicated
+full-screen queue UI (via the terminal's alt-screen buffer — like vim or
+less); you type the follow-up, hit Enter, and the UI disappears restoring
+Claude's view exactly as it was. The queued message is auto-sent the
+moment Claude's prompt becomes empty again.
 
 ---
 
 ## Quick start
 
-```bat
-claude-q doctor            # confirm all green
-claude-q                   # launches Claude Code under the wrapper
+### Requirements
+
+* Windows 10 1809+ (for ConPTY)
+* Python 3.10+
+* [Claude Code CLI](https://github.com/anthropics/claude-code) installed
+  and on your `PATH`
+
+### Install
+
+Clone into `~/.claude/scripts/` (recommended) or anywhere you like:
+
+```powershell
+git clone https://github.com/YOUR-USERNAME/claude-q.git "$env:USERPROFILE\.claude\scripts\claude-queue"
+cd "$env:USERPROFILE\.claude\scripts\claude-queue"
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install pywinpty prompt_toolkit pytest
 ```
 
-Inside the wrapper:
+Add the `.cmd` shim to your `PATH` so `claude-q` works globally:
 
-- Type normally → same as native `claude`
-- Press **Ctrl+Q** → the wrapper switches to **queue mode**; your next line
-  of typing is echoed locally (not sent to Claude). Press **Enter** to push
-  it into the FIFO. You return to direct mode automatically.
-- Press **Esc** while in queue mode to cancel the buffered input.
-- Press **Ctrl+C** → always forwarded to Claude so it can interrupt itself
-  (if you were in queue mode, it also cancels the buffered input first).
-- Window title shows live status: `claude-q │ queue:2 │ mode:direct │ idle`
+```powershell
+[Environment]::SetEnvironmentVariable(
+  "Path",
+  "$env:USERPROFILE\.claude\bin;" + [Environment]::GetEnvironmentVariable("Path", "User"),
+  "User")
+```
 
-When Claude finishes a turn and the prompt becomes empty, the background
-monitor pops the head of the queue and sends it as if you had typed it.
+(Place `bin\claude-q.cmd` and `bin\claude-q-add.cmd` under
+`~/.claude/bin/`; see the `bin/` examples in this repo.)
+
+### Verify
+
+```powershell
+claude-q doctor
+```
+
+All eight checks should report `OK`.
+
+### Run
+
+```powershell
+claude-q
+```
+
+Claude Code launches as usual. The difference: press `Ctrl+Q` mid-response
+to drop into the queue UI.
 
 ---
 
-## Enqueue from a second terminal
+## Keyboard cheatsheet
 
-```bat
-claude-q-add "write tests for foo.py"
-claude-q list
-claude-q drop 20260424T061254_xxxxxx
-claude-q clear
-```
+| In direct mode ( `❯` prompt) | Effect |
+|---|---|
+| Any key | Forwarded to Claude unchanged |
+| `Ctrl+Q` | **Switch to queue mode** (opens alt-screen UI) |
+| `Ctrl+C` | Forwarded — let Claude interrupt itself |
 
-Or via `claude-q add ...` directly.
+| In queue mode (alt-screen UI) | Effect |
+|---|---|
+| Printable keys / IME | Appear in the `> ` input line |
+| `Backspace` | Delete last char |
+| `Enter` | **Queue the message** and return to Claude |
+| `Esc` or `Ctrl+Q` | Cancel without queuing |
 
 ---
 
-## Subcommands
+## Commands
 
 | Command | Purpose |
-| --- | --- |
-| `claude-q start` (or bare `claude-q`) | Start the wrapped session |
-| `claude-q add <text>` | Enqueue a message into the active session |
-| `claude-q status` | Print the active session's JSON status |
-| `claude-q list [--all]` | List pending (or all) queue entries |
-| `claude-q drop <id>` | Drop a single pending entry |
+|---|---|
+| `claude-q` | Start the wrapped session |
+| `claude-q start --cmd <path>` | Wrap a different executable (default: `claude`) |
+| `claude-q start --dry-run` | Wrap `cmd.exe` for smoke-testing |
+| `claude-q add "<text>"` | Append to the active queue from another terminal |
+| `claude-q list [--all]` | Show pending (or all) queue entries |
+| `claude-q drop <id>` | Drop one pending entry |
 | `claude-q clear` | Drop every pending entry |
-| `claude-q stop` | Signal the active session to stop |
-| `claude-q doctor` | Sanity checks (pywinpty, claude, PTY spawn, regex) |
-
-`claude-q start --dry-run` replaces `claude` with `cmd.exe` for smoke tests.
+| `claude-q status` | JSON snapshot (queue length, idle state, mode) |
+| `claude-q stop` | Terminate the active session |
+| `claude-q doctor` | Environment sanity check |
 
 ---
 
-## How idle detection works
+## How it works
 
-`idle_detector.py` uses a composite AND of three signals:
+```
+                   ┌──────────────────┐
+                   │ Windows Terminal │
+                   └────────┬─────────┘
+                            │ stdin (ReadConsoleInputW)
+                            ▼
+   ┌──────────────────────────────────────────────────┐
+   │  claude-q (Python)                                │
+   │                                                   │
+   │   ┌──────────────┐      ┌──────────────────────┐ │
+   │   │ TerminalRelay│◄────▶│ queue_store (JSONL)  │ │
+   │   └──────┬───────┘      └──────────────────────┘ │
+   │          │ bytes                                   │
+   │          ▼                                         │
+   │   ┌──────────────┐      ┌──────────────────────┐ │
+   │   │   pty_host   │◄────▶│ Monitor (idle watch) │ │
+   │   └──────┬───────┘      └──────────────────────┘ │
+   └──────────┼───────────────────────────────────────┘
+              │ pywinpty (ConPTY)
+              ▼
+   ┌──────────────────┐
+   │ claude.exe (Ink) │
+   └──────────────────┘
+```
 
-1. **Empty prompt visible** — regex `│\s*>\s*(│\s*)?$` matches in the last
-   five non-empty lines of stripped output (i.e. Claude's prompt is drawn
-   and the input area is empty).
-2. **No busy marker** — none of `Tokens:`, `esc to interrupt`, `✢ ✻ ✽ ✺`,
-   `Thinking`, `Computing`, `Working` appears in the last 10 lines.
-3. **Content stable** — the hash of the stripped pane tail has not changed
-   for ≥ `debounce_s` (default 600 ms).
-
-If signal 1 has not matched for 30 s but signals 2–3 still hold, the status
-bar shows `⚠drift` so you know the regex may need updating (e.g. if Claude
-changes its prompt glyph).
+* **`win_console_input.py`** — `ReadConsoleInputW` direct read so IME
+  composition and Windows Terminal's ANSI reply injection don't pollute
+  our input stream.
+* **`pty_host.py`** — `pywinpty` wrapper; reader thread writes Claude's
+  bytes to `sys.stdout.buffer` *and* a bounded tail buffer used by the
+  idle detector.
+* **`idle_detector.py`** — three-signal AND: empty prompt + no busy
+  marker + content stable for `debounce_s` (default 600 ms). Supports
+  both the v1 boxed prompt (`│ > │`) and v2 angle prompts (`❯`, `›`).
+* **`monitor.py`** — background thread that, when the detector returns
+  idle and the queue is non-empty, pops the head entry and writes it to
+  the PTY.
+* **`terminal_relay.py`** — keyboard loop. In direct mode every key is
+  forwarded to the PTY. On `Ctrl+Q` we emit `\x1b[?1049h` to enter the
+  terminal's alt-screen buffer, draw a dedicated queue UI there, then on
+  exit emit `\x1b[?1049l` and the terminal restores Claude's main-screen
+  view exactly as it was — no redraw fight with Ink.
 
 ---
 
 ## File layout
 
 ```
-~/.claude/scripts/claude-queue/
-├── .venv/                  # dedicated virtualenv (isolated from thesis)
-├── cli.py                  # argparse entrypoint
-├── session.py              # session id + paths + ACTIVE pointer
-├── config.py               # defaults + optional ~/.claude/claude-q.toml
-├── queue_store.py          # atomic JSONL FIFO
-├── pty_host.py             # pywinpty wrapper
-├── idle_detector.py        # three-signal AND + debounce
-├── monitor.py              # background dispatcher thread
-├── terminal_relay.py       # keyboard loop + mode toggle
-├── status_bar.py           # window-title status + status.json
-├── README.md               # this file
-└── tests/                  # pytest suite (to be expanded)
-
-~/.claude/bin/
-├── claude-q.cmd            # main wrapper
-└── claude-q-add.cmd        # enqueue-from-elsewhere shortcut
-
-~/.claude/run/claude-q/<session_id>/
-├── session.json            # pid, started_at, claude_cmd, dimensions
-├── queue.jsonl             # append-only FIFO (crash-safe, inspectable)
-├── status.json             # live monitor snapshot (polled by status_bar)
-└── monitor.log             # debug log
+claude-queue/
+├── LICENSE
+├── README.md
+├── __init__.py
+├── cli.py                 # entrypoint (argparse dispatcher)
+├── session.py             # session id + paths + ACTIVE pointer
+├── config.py              # defaults + optional TOML override
+├── queue_store.py         # atomic JSONL FIFO
+├── pty_host.py            # pywinpty wrapper
+├── win_console_input.py   # ReadConsoleInputW binding
+├── idle_detector.py       # three-signal AND idle detection
+├── monitor.py             # background dispatcher thread
+├── terminal_relay.py      # keyboard <-> PTY bridge + queue UI
+├── status_bar.py          # window-title status reporter
+├── diag_keys.py           # standalone key-read diagnostic
+└── tests/
+    └── test_e2e_smoke.py  # pytest end-to-end suite
 ```
 
----
-
-## Current limitations
-
-* **Windows only** today. POSIX support via `ptyprocess` is a straight
-  drop-in for `pty_host.py` but not wired up yet.
-* Some special-key sequences beyond arrows / Home/End / F1-F4 may not be
-  forwarded in direct mode; raw `claude` remains the fallback for
-  keyboard-heavy interactions.
-* If Claude Code changes its prompt glyph the idle regex will need an
-  update (the wrapper will warn via `⚠drift` when that happens).
+Runtime data lives under `~/.claude/run/claude-q/<session_id>/` and is
+not versioned.
 
 ---
 
-## Troubleshooting
+## Known limitations
 
-* `claude: not found` → `claude-q doctor` will tell you. Either install
-  Claude Code or pass `--cmd <path-to-claude>`.
-* Garbled Chinese in the wrapper's own messages → run `chcp 65001` once in
-  the terminal; the wrapper also sets the codepage on start.
-* Queue entry never sent → check `monitor.log` in the run dir; most likely
-  the idle detector never saw an empty prompt (prompt drift). Update
-  `PROMPT_RE` in `idle_detector.py` to match the current prompt.
+* Windows only. Linux/macOS support is a future project — the alt-screen
+  UI layer is portable, but `win_console_input.py` needs a `termios`
+  equivalent.
+* Some special-key combinations beyond arrows / Home/End / F1-F4 may not
+  be forwarded in direct mode; fall back to plain `claude` for
+  keyboard-heavy interactions like `/` slash-menu navigation if you hit
+  trouble.
+* Claude Code's own native type-ahead queue still exists side-by-side
+  with ours — you can use either, but don't expect them to cooperate.
+  Our queue is entirely isolated and runs the moment Claude's prompt is
+  empty.
 
 ---
 
-## Design rationale (short)
+## Development
 
-Native Claude Code has an unreliable behaviour when you hit Enter during
-streaming (tracked in anthropics/claude-code issues #50246, #34835,
-#33323, #26388, #1126). Existing third-party tools are all either batch
-rate-limit queues (`JCSnap/claude-code-queue`, `vasiliyk/claude-queue`)
-that ask you to run Claude unattended, or they require a second terminal
-(`snomiao/agent-yes`). None fit the *inline type-ahead during an active
-session* pattern that VS Code Copilot Chat provides. `claude-q` is a
-minimal wrapper that solves exactly that gap while leaving the Claude TUI
-untouched.
+Run the self-tests and pytest suite:
+
+```powershell
+cd ~\.claude\scripts\claude-queue
+.venv\Scripts\python.exe queue_store.py
+.venv\Scripts\python.exe idle_detector.py
+.venv\Scripts\python.exe terminal_relay.py
+.venv\Scripts\python.exe -m pytest tests/
+```
+
+Keyboard diagnostic (prints hex codes as you press keys):
+
+```powershell
+.venv\Scripts\python.exe diag_keys.py
+```
+
+### Design notes
+
+This project deliberately avoids:
+
+* A separate window (tmux/screen) — users asked for a pure single-terminal
+  experience.
+* An embedded Python TUI library (Textual, prompt_toolkit full screen) for
+  the Claude side — re-rendering Ink output through another layer is a
+  losing game; we just relay bytes.
+* A daemon / background service — everything runs inside the single
+  `python cli.py` process for easy cleanup (`Ctrl+C` ends the whole thing).
+
+---
+
+## Contributing
+
+PRs welcome. Please:
+
+1. Open an issue first for non-trivial changes.
+2. Run `pytest` and keep the self-tests green.
+3. Follow the existing style (PEP 8, typed signatures where helpful,
+   short docstrings).
+4. Keep the dependency footprint small — `pywinpty` +
+   `prompt_toolkit` + stdlib is the current budget.
+
+---
+
+## License
+
+MIT — see [`LICENSE`](./LICENSE).
+
+---
+
+## Credits
+
+* Built on top of [pywinpty](https://github.com/andfoy/pywinpty) by
+  Andrés Felipe Zapata Mesa et al.
+* Inspired by discussions in
+  [anthropics/claude-code#50246](https://github.com/anthropics/claude-code/issues/50246).
+* Authored by [Sung](mailto:u10912029@ms.ttu.edu.tw) with pair-programming
+  assistance from Claude.
