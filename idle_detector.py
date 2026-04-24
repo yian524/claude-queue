@@ -32,23 +32,21 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
 # Any of these followed only by whitespace means the input area is empty.
 PROMPT_RE = re.compile(r"(?:[❯›〉]|│\s*>\s*│?)\s*$")
 
-# Markers that indicate Claude is actively working. We match against the
-# LAST FEW LINES only (not the whole tail) so that transient busy indicators
-# don't keep us stuck once Claude has returned to idle.
-BUSY_MARKERS = (
-    "esc to interrupt",
-    "✢",
-    "✻",
-    "✽",
-    "✺",
-    "↓ ",  # "↓ 259 tokens)" style status line
-    "Channelling",
-    "Actioning",
-    "Compacting",
-    "Thinking…",
-    "Computing…",
-    "Working…",
-)
+# Markers that indicate Claude is ACTIVELY working.
+#
+# Claude Code v2.1+ uses whimsical action verbs (Honking, Moonwalking,
+# Percolating, Sautéing, Channelling, Actioning, Compacting, Thinking,
+# Computing, Working) with a spinner prefix (✻ ✢ ✽ ✺ * + ●) and an ellipsis
+# suffix (…). When the action FINISHES, the same line stays on screen but
+# uses past tense and drops the ellipsis, e.g. "✻ Sautéed for 52s".
+#
+# So the reliable rule is: "spinner + ellipsis" = active, anything else
+# (including spinner without ellipsis, like "Sautéed for N s") = done.
+#
+# We also always treat "esc to interrupt" as busy — Claude only shows that
+# hint while genuinely mid-generation.
+BUSY_STATUS_RE = re.compile(r"^\s*[+*●·✻✢✽✺]\s+\S+…")
+BUSY_LITERALS = ("esc to interrupt",)
 
 # How many trailing non-empty lines to inspect for busy markers.
 # Busy indicators are always on the bottom status line(s); older scrollback
@@ -98,8 +96,11 @@ def is_idle(
 
     # signal 2: no busy marker in the LAST FEW lines (not whole tail),
     # so stale indicators from earlier answers don't keep us stuck.
-    tail_busy = "\n".join(lines[-_BUSY_TAIL_LINES:])
-    busy = any(m in tail_busy for m in BUSY_MARKERS)
+    tail_lines = lines[-_BUSY_TAIL_LINES:]
+    busy = (
+        any(BUSY_STATUS_RE.search(ln) for ln in tail_lines)
+        or any(lit in ln for ln in tail_lines for lit in BUSY_LITERALS)
+    )
 
     # signal 3: content stable for debounce_s
     h = hashlib.md5(clean.encode("utf-8", errors="replace")).hexdigest()
@@ -141,15 +142,14 @@ def apply_result(state: IdleState, r: IdleResult) -> None:
 _FAKE_IDLE = """
 Here is the answer you asked for.
 More answer text here.
-More idle content.
+✻ Sautéed for 52s
 ❯
 """
 
 _FAKE_STREAMING = """
 I'll think about this carefully.
 
-✢ Channelling... (7s)
-↓ 259 tokens)
+✢ Channelling… (7s · ↓ 259 tokens)
 """
 
 _FAKE_THINKING = """
