@@ -28,12 +28,32 @@ import shutil
 import sys
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Callable, Optional
 
 import queue_store
 import scheduler as _scheduler
 import slash_commands as _slash
+
+
+def _visual_width(text: str) -> int:
+    """Return the on-screen column width of a string.
+
+    CJK / emoji / fullwidth characters take 2 columns; everything else
+    takes 1. This matters for cursor positioning inside the queue UI:
+    using `len()` undercounts when the buffer contains Chinese, so the
+    ANSI cursor lands too far left and appears outside the input box.
+    """
+    w = 0
+    for ch in text:
+        if unicodedata.east_asian_width(ch) in ("W", "F"):
+            w += 2
+        elif unicodedata.category(ch) in ("Mn", "Me", "Cf"):
+            w += 0  # combining / zero-width
+        else:
+            w += 1
+    return w
 
 # ANSI alt-screen sequences
 # - ?1049h: switch to alt screen + save cursor
@@ -577,21 +597,27 @@ class TerminalRelay:
         input_row = row + 1  # ANSI rows are 1-based
         buf = "".join(self._queue_buf)
         prompt_visible = "  > "          # 4 cols: "  ", ">", " "
-        # keep the right side of buf visible if it overflows
-        max_buf_visible = cols - 2 - len(prompt_visible) - 1
-        buf_display = buf if len(buf) <= max_buf_visible else buf[-max_buf_visible:]
+        # Keep the RIGHT side of buf visible if it overflows. Truncate by
+        # visual width, not char count, so CJK characters (2 cols each) don't
+        # drive the wrap point wrong.
+        max_buf_visible_cols = cols - 2 - len(prompt_visible) - 1
+        buf_display = buf
+        while _visual_width(buf_display) > max_buf_visible_cols:
+            buf_display = buf_display[1:]
+        buf_vw = _visual_width(buf_display)
         line_text = (
             "\x1b[36m║\x1b[0m"                      # left border (no width)
             + "  "                                   # 2-col indent
             + "\x1b[1;35m>\x1b[0m "                  # coloured prompt + space
             + buf_display
         )
-        visible_len = 2 + 2 + len(buf_display)       # "  " + "> " + buf
+        visible_len = 2 + 2 + buf_vw                 # "  " + "> " + buf (visual)
         pad = cols - 2 - visible_len
         add(line_text + " " * max(0, pad) + "\x1b[36m║\x1b[0m")
 
-        # cursor column: after "║" (col 1) + "  " (2 cols) + "> " (2 cols) + buf
-        cursor_col = 1 + 2 + 2 + len(buf_display) + 1  # +1 because 1-based
+        # cursor column: after "║" (col 1) + "  " (2 cols) + "> " (2 cols)
+        # + buf's VISUAL width (CJK = 2 cols each)
+        cursor_col = 1 + 2 + 2 + buf_vw + 1  # +1 because 1-based
 
         add("\x1b[36m║" + " " * (cols - 2) + "║\x1b[0m")
         add("\x1b[36m╚" + "═" * (cols - 2) + "╝\x1b[0m")
