@@ -331,17 +331,18 @@ class TerminalRelay:
             pass
         self._mode = "direct"
 
-        # Act on the parsed command (or fall back to plain push)
+        # Act on the parsed command (or fall back to plain push).
+        # Confirmation messages go to the WINDOW TITLE (OSC 0) not the
+        # main screen, so they don't fight with Claude's Ink TUI for
+        # screen real estate. The cursor stays on Claude's own input
+        # prompt — which is what the user wants.
         if push:
             try:
                 if isinstance(parsed, _slash.ForceSendRequest):
-                    # /now - write directly to PTY, bypass queue entirely
                     self._send_to_pty((parsed.text.rstrip("\r\n") + "\r")
                                       .encode("utf-8"))
-                    sys.stdout.write(
-                        f"\r\n\x1b[33m[claude-q] /now: sent directly "
-                        f"(may interrupt Claude)\x1b[0m\r\n"
-                    )
+                    self._set_title(f"claude-q /now sent: "
+                                    f"{parsed.text[:40]!r}")
                 elif isinstance(parsed, _slash.QueueRequest):
                     eid = queue_store.push(
                         self.queue_path,
@@ -351,23 +352,25 @@ class TerminalRelay:
                         priority=parsed.priority,
                     )
                     when = (_scheduler.humanize_delta(parsed.dispatch_at)
-                            if parsed.dispatch_at else "ASAP on idle")
+                            if parsed.dispatch_at else "ASAP")
                     tag = "priority" if parsed.priority > 0 else "queued"
-                    sys.stdout.write(
-                        f"\r\n\x1b[32m[claude-q] {tag} id={eid[:15]} "
-                        f"({when}) preview={parsed.text[:60]!r}\x1b[0m\r\n"
+                    n = queue_store.pending_len(self.queue_path)
+                    self._set_title(
+                        f"claude-q {tag} ({when}) pending:{n} - "
+                        f"{parsed.text[:40]!r}"
                     )
                 elif raw_text:
-                    # fallback (shouldn't happen now, but safe)
                     eid = queue_store.push(self.queue_path, raw_text,
                                            source="queue-pane")
-                    sys.stdout.write(
-                        f"\r\n\x1b[32m[claude-q] queued id={eid[:15]} "
-                        f"preview={raw_text[:60]!r}\x1b[0m\r\n"
+                    n = queue_store.pending_len(self.queue_path)
+                    self._set_title(
+                        f"claude-q queued pending:{n} - {raw_text[:40]!r}"
                     )
-                sys.stdout.flush()
             except Exception as e:
-                sys.stdout.write(f"\r\n\x1b[31m[claude-q] push failed: {e}\x1b[0m\r\n")
+                # Errors DO go to main screen because user must see them
+                sys.stdout.write(
+                    f"\r\n\x1b[31m[claude-q] push failed: {e}\x1b[0m\r\n"
+                )
                 sys.stdout.flush()
 
         # resume Claude->stdout passthrough AFTER alt screen exit so
@@ -652,6 +655,20 @@ class TerminalRelay:
         except Exception as e:
             sys.stdout.write(f"\r\n\x1b[31m[claude-q] pty write error: {e}\x1b[0m\r\n")
             sys.stdout.flush()
+
+    @staticmethod
+    def _set_title(text: str) -> None:
+        """Write the window title via OSC 0 so confirmation messages don't
+        pollute Claude's main screen. Silently fail on terminals that don't
+        support title setting (the status_bar thread also sets it so
+        this is only a short-lived override; it gets refreshed every
+        ~250 ms anyway)."""
+        try:
+            payload = f"\x1b]0;{text}\x07".encode("utf-8", errors="replace")
+            sys.stdout.buffer.write(payload)
+            sys.stdout.buffer.flush()
+        except Exception:
+            pass
 
     def _debug(self, msg: str) -> None:
         if not _DEBUG:

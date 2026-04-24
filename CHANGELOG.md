@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-04-24
+
+### Changed
+- **Queue confirmation moves from main screen to window title.** Every
+  `[claude-q] queued id=...` confirmation and `/now sent` message now
+  updates the terminal window title (OSC 0) instead of printing on the
+  main screen. This keeps the cursor on Claude's own input prompt and
+  eliminates the extra green text line that used to stack up next to
+  Claude's chat history.
+- Error messages (`push failed`, etc.) still print on the main screen
+  because the user needs to see them.
+
 ## [0.3.4] - 2026-04-24
 
 ### Fixed
