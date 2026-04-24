@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-04-24
+
+### Added
+- Queue-mode Pending list now shows scheduling info next to each entry:
+  `★` for priority, `in Xs` for time-to-dispatch, `ASAP` for
+  unscheduled. Entries are also rendered in the exact order the monitor
+  will dispatch them (priority desc, dispatch_at asc, ts asc) so the UI
+  matches reality.
+- New slash commands for in-queue editing:
+  - `/drop <N>` — drop pending entry #N (same numbering as the
+    Pending list)
+  - `/clear` — drop all pending entries
+
+### Changed
+- Monitor now logs ready-set transitions and dispatch blocks to
+  `monitor.log`. When entries are ready but idle-detector is holding
+  back, it logs the reasons (throttled to once every 3 seconds) so
+  "why didn't my /wait fire?" reports are diagnosable.
+
 ## [0.3.1] - 2026-04-24
 
 ### Changed

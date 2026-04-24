@@ -134,10 +134,18 @@ class Monitor:
 
     def _tick(self) -> None:
         now = time.monotonic()
+        prev_ready = self.state.ready_len
         # update queue length (total pending; both scheduled-future and ready)
         self.state.queue_len = queue_store.pending_len(self.queue_path)
         # track dispatch-ready (eligible NOW) — what monitor actually may send
         self.state.ready_len = queue_store.dispatch_ready_len(self.queue_path)
+        # Log every time the ready-set changes (an entry matured or was
+        # dispatched); helps diagnose "why didn't my /wait fire?" reports.
+        if self.state.ready_len != prev_ready:
+            self._logger.info(
+                f"ready_len changed {prev_ready} -> {self.state.ready_len} "
+                f"(total pending={self.state.queue_len})"
+            )
 
         tail = self.pty_tail_fn()
         result = idle_detector.is_idle(
@@ -155,6 +163,17 @@ class Monitor:
 
         # don't dispatch during startup grace, during queue mode, or within
         # post_dispatch_backoff of the last send
+        # Log blocking reasons ONLY when we have ready entries; this is
+        # the signal for "why didn't my /wait fire?".
+        if self.state.ready_len > 0 and not result.idle:
+            # throttle: log at most every 3 seconds
+            if now - getattr(self, "_last_block_log", 0) > 3.0:
+                self._logger.info(
+                    f"holding dispatch: ready={self.state.ready_len} "
+                    f"reasons={result.reasons} drift={result.drift_detected}"
+                )
+                self._last_block_log = now
+
         if now - self._started_at < self.startup_grace_s:
             return
         if self.get_mode() != "direct":

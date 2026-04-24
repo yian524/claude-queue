@@ -395,6 +395,12 @@ class TerminalRelay:
         if isinstance(parsed, _slash.HelpRequest):
             self._render_queue_ui(note=self._help_text())
             return
+        if isinstance(parsed, _slash.DropRequest):
+            self._handle_drop(parsed.index)
+            return
+        if isinstance(parsed, _slash.ClearRequest):
+            self._handle_clear()
+            return
         # (CancelRequest removed in v0.3.1 — Esc / Ctrl+Q already cancel)
 
         # QueueRequest or ForceSendRequest: exit mode and push/send
@@ -402,12 +408,37 @@ class TerminalRelay:
 
     @staticmethod
     def _help_text() -> str:
-        """One-line help shown in queue UI when user types /help.
+        """One-line help shown in queue UI when user types /help."""
+        return ("/wait <dur> msg | /at <time> msg | /priority msg | /now msg "
+                "| /drop N | /clear | /help  (Esc or Ctrl+Q cancels)")
 
-        /cancel is not listed — Esc / Ctrl+Q cancel queue mode directly.
-        """
-        return ("/wait <dur> msg | /at <time> msg | /priority msg | "
-                "/now msg | /help  (Esc or Ctrl+Q to cancel)")
+    # ------------------------- /drop /clear handlers -------------------------
+
+    def _handle_drop(self, index: int) -> None:
+        """Drop Pending entry at 1-based index N, then stay in queue mode."""
+        self._queue_buf = []
+        pending = [e for e in queue_store.list_all(self.queue_path)
+                   if e.status == queue_store.STATUS_PENDING]
+        if index < 1 or index > len(pending):
+            self._render_queue_ui(
+                note=f"/drop: index {index} out of range (have {len(pending)})"
+            )
+            return
+        # Show by dispatch order (same as render order)
+        pending_sorted = sorted(pending, key=queue_store._rank)
+        target = pending_sorted[index - 1]
+        ok = queue_store.drop(self.queue_path, target.id)
+        if ok:
+            self._render_queue_ui(
+                note=f"dropped: {target.text[:50]!r}"
+            )
+        else:
+            self._render_queue_ui(note="/drop: already dropped?")
+
+    def _handle_clear(self) -> None:
+        self._queue_buf = []
+        n = queue_store.clear(self.queue_path)
+        self._render_queue_ui(note=f"/clear: dropped {n} entries")
 
     def _cancel_queue_input(self, silent: bool = False) -> None:
         self._exit_queue_mode(push=False)
@@ -431,6 +462,9 @@ class TerminalRelay:
             e for e in queue_store.list_all(self.queue_path)
             if e.status == queue_store.STATUS_PENDING
         ]
+        # Show in the same order the monitor will dispatch them
+        # (priority desc, dispatch_at asc, ts asc).
+        pending.sort(key=queue_store._rank)
 
         sid = (self.session_id or "(no-session)")[:30]
         out: list[str] = []
@@ -463,14 +497,25 @@ class TerminalRelay:
         header = f"  Pending ({len(pending)}):"
         add("\x1b[36m║\x1b[0m" + header + " " * max(0, cols - 2 - len(header))
             + "\x1b[36m║\x1b[0m")
-        shown = pending[-8:]
+        shown = pending[:8]   # first 8 in dispatch order
         if shown:
-            start_idx = max(1, len(pending) - 7)
-            for i, e in enumerate(shown, start=start_idx):
+            for i, e in enumerate(shown, start=1):
                 preview = e.text.replace("\n", " ")
-                if len(preview) > cols - 12:
-                    preview = preview[:cols - 15] + "..."
-                line = f"    {i:>2}. {preview}"
+                # build the scheduling suffix: "★" priority, "in Xs" schedule
+                suffix_parts = []
+                if e.priority > 0:
+                    suffix_parts.append("★")
+                if e.dispatch_at is not None:
+                    suffix_parts.append(_scheduler.humanize_delta(e.dispatch_at))
+                else:
+                    suffix_parts.append("ASAP")
+                suffix = "  " + " · ".join(suffix_parts)
+                max_prev = cols - 8 - len(suffix)
+                if max_prev < 10:
+                    max_prev = 10
+                if len(preview) > max_prev:
+                    preview = preview[:max_prev - 3] + "..."
+                line = f"    {i:>2}. {preview}{suffix}"
                 pad = cols - 2 - len(line)
                 add("\x1b[36m║\x1b[0m" + line + " " * max(0, pad)
                     + "\x1b[36m║\x1b[0m")

@@ -64,13 +64,26 @@ class HelpRequest:
 
 
 @dataclass
+class DropRequest:
+    """/drop <N> - drop pending entry at 1-based index N."""
+    index: int
+
+
+@dataclass
+class ClearRequest:
+    """/clear - drop all pending entries."""
+
+
+@dataclass
 class ParseError:
     """Malformed command; caller should show the message and stay in queue."""
     message: str
 
 
-ParseResult = Union[QueueRequest, ForceSendRequest, CancelRequest,
-                    HelpRequest, ParseError]
+ParseResult = Union[
+    QueueRequest, ForceSendRequest, CancelRequest, HelpRequest,
+    DropRequest, ClearRequest, ParseError,
+]
 
 
 # ============================= command metadata =============================
@@ -97,6 +110,16 @@ COMMANDS: list[dict] = [
         "name": "/now",
         "template": "/now <message>",
         "summary": "WARNING: send immediately, interrupts Claude",
+    },
+    {
+        "name": "/drop",
+        "template": "/drop <N>",
+        "summary": "Drop pending entry #N (see the Pending list)",
+    },
+    {
+        "name": "/clear",
+        "template": "/clear",
+        "summary": "Drop ALL pending entries",
     },
     {
         "name": "/help",
@@ -151,8 +174,24 @@ def parse(raw: str) -> ParseResult:
         return _parse_wait(rest)
     if cmd == "/at":
         return _parse_at(rest)
+    if cmd == "/drop":
+        return _parse_drop(rest)
+    if cmd == "/clear":
+        return ClearRequest()
 
     return ParseError(f"unknown command {cmd!r}; try /help")
+
+
+def _parse_drop(rest: str) -> ParseResult:
+    if not rest.strip():
+        return ParseError("/drop needs a pending index (e.g. /drop 1)")
+    try:
+        idx = int(rest.strip())
+    except ValueError:
+        return ParseError(f"/drop: {rest.strip()!r} is not a valid index")
+    if idx < 1:
+        return ParseError("/drop: index must be >= 1")
+    return DropRequest(index=idx)
 
 
 def _parse_wait(rest: str) -> ParseResult:
@@ -243,6 +282,16 @@ def _self_test() -> int:
 
     # unknown command
     assert isinstance(parse("/foobar"), ParseError)
+
+    # /drop
+    r = parse("/drop 2")
+    assert isinstance(r, DropRequest) and r.index == 2
+    assert isinstance(parse("/drop"), ParseError)
+    assert isinstance(parse("/drop abc"), ParseError)
+    assert isinstance(parse("/drop 0"), ParseError)
+
+    # /clear
+    assert isinstance(parse("/clear"), ClearRequest)
 
     # empty
     assert isinstance(parse(""), ParseError)
