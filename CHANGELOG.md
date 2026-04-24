@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-04-24
+
+### Added
+- **`claude -q log` subcommand** for inspecting `monitor.log` when
+  diagnosing stuck / slow dispatches. Supersedes the standalone
+  `bin/claude-q-log.ps1` script (which was never on PATH so users
+  couldn't actually invoke it).
+  - `claude -q log` — list 10 most recent sessions with log sizes
+  - `claude -q log --latest` — dump the newest session's log
+  - `claude -q log --session <id or prefix>` — dump a specific session
+  - `claude -q log --since 18:00` — dump all sessions modified after HH:MM today
+  - `--tail N` on any dump mode to show only the last N lines
+
 ## [0.4.2] - 2026-04-24
 
 ### Fixed

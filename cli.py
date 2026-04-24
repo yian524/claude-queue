@@ -450,6 +450,94 @@ def cmd_sessions(args: argparse.Namespace) -> int:
     return 0
 
 
+# ------------------------- subcommand: log -------------------------
+
+def cmd_log(args: argparse.Namespace) -> int:
+    """Inspect monitor.log files across sessions for debugging.
+
+    Default (no args): list recent sessions + their log sizes.
+    --latest:       dump the most recent session's monitor.log in full.
+    --session SID:  dump a specific session's monitor.log.
+    --tail N:       only show last N lines (default: full file).
+    --since HH:MM:  list sessions whose log was modified today after HH:MM.
+    """
+    import datetime as _dt
+    root = session.run_root()
+    dirs = sorted(
+        (p for p in root.iterdir() if p.is_dir()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not dirs:
+        print("[claude -q] no sessions found under", root)
+        return 0
+
+    def _dump(run_dir: Path, tail: Optional[int] = None) -> None:
+        log_path = run_dir / "monitor.log"
+        ts = _dt.datetime.fromtimestamp(run_dir.stat().st_mtime).strftime("%H:%M:%S")
+        print(f"\x1b[36m=== {run_dir.name}  (modified {ts}) ===\x1b[0m")
+        if not log_path.exists():
+            print("  (no monitor.log)")
+            return
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            print(f"  (read error: {e})")
+            return
+        lines = text.splitlines()
+        if tail is not None and tail > 0 and len(lines) > tail:
+            lines = lines[-tail:]
+            print(f"  (showing last {tail} of {len(text.splitlines())} lines)")
+        for ln in lines:
+            print(ln)
+
+    if args.latest:
+        _dump(dirs[0], tail=args.tail)
+        return 0
+
+    if args.session:
+        sid = session.resolve_session(args.session)
+        if sid is None:
+            print(f"[claude -q] session {args.session!r} not found")
+            return 1
+        _dump(root / sid, tail=args.tail)
+        return 0
+
+    if args.since:
+        today = _dt.date.today()
+        try:
+            hh, mm = (int(x) for x in args.since.split(":"))
+        except Exception:
+            print(f"[claude -q] --since {args.since!r} must be HH:MM")
+            return 2
+        cutoff = _dt.datetime.combine(today, _dt.time(hh, mm))
+        matching = [
+            p for p in dirs
+            if _dt.datetime.fromtimestamp(p.stat().st_mtime) >= cutoff
+        ]
+        if not matching:
+            print(f"[claude -q] no sessions modified after {args.since} today")
+            return 0
+        for p in matching:
+            _dump(p, tail=args.tail)
+            print()
+        return 0
+
+    # default: list recent sessions
+    print(f"[claude -q] Recent sessions under {root}:")
+    for p in dirs[:10]:
+        log_path = p / "monitor.log"
+        size = f"{log_path.stat().st_size / 1024:.1f} KB" if log_path.exists() else "(no log)"
+        ts = _dt.datetime.fromtimestamp(p.stat().st_mtime).strftime("%H:%M:%S")
+        print(f"  {ts}  {p.name}  {size}")
+    print()
+    print("Dump:     claude -q log --latest")
+    print("          claude -q log --session <id or prefix>")
+    print("          claude -q log --since 18:00")
+    print("Add      --tail N   to show only last N lines")
+    return 0
+
+
 # ------------------------- subcommand: scheduler -------------------------
 
 _SCHED_TASK_NAME = "claude-q-scheduler"
@@ -712,6 +800,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_sessions = sub.add_parser("sessions", help="list all known sessions")
     p_sessions.set_defaults(func=cmd_sessions)
+
+    p_log = sub.add_parser(
+        "log",
+        help="inspect monitor.log for debugging (list sessions or dump logs)",
+    )
+    p_log.add_argument("--latest", action="store_true",
+                       help="dump the most recent session's monitor.log")
+    p_log.add_argument("--session", metavar="SID",
+                       help="session id or unique prefix")
+    p_log.add_argument("--since", metavar="HH:MM",
+                       help="dump all sessions modified after HH:MM today")
+    p_log.add_argument("--tail", type=int, default=None, metavar="N",
+                       help="only show last N lines of the log")
+    p_log.set_defaults(func=cmd_log)
 
     p_sched = sub.add_parser(
         "scheduler",
