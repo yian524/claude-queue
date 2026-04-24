@@ -36,6 +36,42 @@ moment Claude's prompt becomes empty again.
 
 ---
 
+## What it looks like
+
+The queue UI in action (alt-screen, fully isolated from Claude's view):
+
+```text
+╔══════════════════════════════════════════════════════════════════════════╗
+║  [claude -q]  QUEUE INPUT                       session: 20260424T193026 ║
+╠══════════════════════════════════════════════════════════════════════════╣
+║  Pending (2):                                                            ║
+║     1. run the test suite on dept-B branch                        ASAP   ║
+║     2. summarise today's decisions in one paragraph        · in 5m 0s    ║
+╠══════════════════════════════════════════════════════════════════════════╣
+║  Enter=queue   Esc / Ctrl+Q=cancel   Backspace=delete                    ║
+║  Waiting: Claude is busy                                                 ║
+║                                                                          ║
+║                                                                          ║
+║   Commands  (↑↓ select, Tab/Enter pick, Esc close)                       ║
+║    ► /wait <duration> <message>   Dispatch after duration                ║
+║      /at <time> <message>         Dispatch at absolute time              ║
+║      /priority <message>          Jump ahead of normal queue             ║
+║      /now <message>               WARNING: send immediately              ║
+║                                                                          ║
+║  > /w                                                                    ║
+╚══════════════════════════════════════════════════════════════════════════╝
+```
+
+When you hit Enter the UI vanishes and Claude's view comes back
+untouched. The queued message is sent the moment Claude's prompt is
+empty again.
+
+> 📸 Real-terminal screenshots live in
+> [`docs/screenshots/`](./docs/screenshots/). Contributions welcome —
+> see that folder's README for the shots we'd like to collect.
+
+---
+
 ## Quick start
 
 ### Requirements
@@ -117,9 +153,15 @@ to drop into the queue UI.
 
 | In queue mode (alt-screen UI) | Effect |
 |---|---|
-| Printable keys / IME | Appear in the `> ` input line |
-| `Backspace` | Delete last char |
+| Printable keys / IME | Insert at cursor position |
+| `Backspace` | Delete char before cursor |
+| `Delete` | Delete char at cursor |
+| `←` / `→` | Move cursor one char (handles CJK 2-column width) |
+| `Home` / `End` | Jump to start / end of input |
+| `Ctrl+Enter` / `Shift+Enter` | Insert literal newline (multi-line input) |
 | `Enter` | **Queue the message** and return to Claude |
+| `↑` / `↓` | Navigate slash-command dropdown (when open) |
+| `Tab` | Accept dropdown selection |
 | `Esc` or `Ctrl+Q` | Cancel without queuing |
 
 ---
@@ -139,6 +181,12 @@ to drop into the queue UI.
 | `claude -q status` | JSON snapshot (queue length, idle state, mode) |
 | `claude -q stop` | Terminate the active session |
 | `claude -q scheduler install\|uninstall\|status\|run-once` | Windows-Task-based sweep daemon |
+| `claude -q log` | List recent sessions with their monitor log sizes |
+| `claude -q log --latest` | Dump the newest session's `monitor.log` |
+| `claude -q log --session <id or prefix>` | Dump a specific session |
+| `claude -q log --since HH:MM` | Dump every session modified after HH:MM today |
+| `claude -q log --errors` | Dump the relay crash log (rare, diagnostic) |
+| `claude -q log --tail N` | Limit any dump to the last N lines |
 | `claude -q doctor` | Environment sanity check |
 
 ## Slash commands (inside the queue-mode UI)
@@ -263,6 +311,20 @@ claude-queue/
 
 Runtime data lives under `~/.claude/run/claude-q/<session_id>/` and is
 not versioned.
+
+---
+
+## Troubleshooting
+
+| Symptom | What to do |
+|---|---|
+| `claude -q` not recognised | Restart PowerShell (so `$PROFILE` is re-sourced) or run `. $PROFILE`. Verify the function exists with `Get-Command claude`. |
+| `doctor` says `claude: NOT FOUND` | Install [Claude Code CLI](https://github.com/anthropics/claude-code) and re-open the terminal so its install dir is on `PATH`. |
+| `doctor` says `pywinpty: FAIL` | `.venv\Scripts\python.exe -m pip install --upgrade pywinpty`. Python 3.10+ is required. |
+| Typing Chinese/CJK makes cursor land wrong | Fixed in v0.3.9+. Pull latest. |
+| Queue entry never dispatches | Run `claude -q log --latest` — the reason tag (`prompt_visible: False` / `not_busy: False` / `stable: False`) tells you what the monitor is waiting on. Common cause: Claude has draft text in its prompt — submit or clear it. |
+| A keystroke caused a crash note in the UI | Run `claude -q log --errors` and open an issue with the traceback. Since v0.4.6 a bad key no longer kills the session. |
+| Tab title stays stuck on `⚠STUCK Ns press Esc in Claude` | Click into Claude's window and press `Esc` — Claude is in an "Esc again to clear" prompt state that the wrapper correctly refuses to overwrite. |
 
 ---
 
