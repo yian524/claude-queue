@@ -50,7 +50,7 @@ moment Claude's prompt becomes empty again.
 Clone into `~/.claude/scripts/` (recommended) or anywhere you like:
 
 ```powershell
-git clone https://github.com/YOUR-USERNAME/claude-q.git "$env:USERPROFILE\.claude\scripts\claude-queue"
+git clone https://github.com/yian524/claude-queue.git "$env:USERPROFILE\.claude\scripts\claude-queue"
 cd "$env:USERPROFILE\.claude\scripts\claude-queue"
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install pywinpty prompt_toolkit pytest
