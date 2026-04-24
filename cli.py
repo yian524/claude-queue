@@ -439,6 +439,122 @@ def cmd_sessions(args: argparse.Namespace) -> int:
     return 0
 
 
+# ------------------------- subcommand: scheduler -------------------------
+
+_SCHED_TASK_NAME = "claude-q-scheduler"
+
+
+def cmd_scheduler(args: argparse.Namespace) -> int:
+    """Install/uninstall/status the Windows Scheduled Task that sweeps
+    for overdue entries every minute, so scheduled dispatches still get
+    noticed even when all claude-q CLI windows are closed."""
+    action = args.action
+    if action == "install":
+        return _scheduler_install()
+    if action == "uninstall":
+        return _scheduler_uninstall()
+    if action == "status":
+        return _scheduler_status()
+    if action == "run-once":
+        # for manual testing
+        import scheduler_tick
+        return scheduler_tick.main()
+    print(f"[claude-q] unknown action: {action}", file=sys.stderr)
+    return 2
+
+
+def _scheduler_install() -> int:
+    import subprocess
+    python_exe = (Path(os.environ["USERPROFILE"])
+                  / ".claude" / "scripts" / "claude-queue"
+                  / ".venv" / "Scripts" / "python.exe")
+    tick_script = (Path(os.environ["USERPROFILE"])
+                   / ".claude" / "scripts" / "claude-queue"
+                   / "scheduler_tick.py")
+    if not python_exe.exists():
+        print(f"[claude-q] ERROR: venv python not found at {python_exe}",
+              file=sys.stderr)
+        return 2
+    if not tick_script.exists():
+        print(f"[claude-q] ERROR: scheduler_tick.py not found at {tick_script}",
+              file=sys.stderr)
+        return 2
+    # Build the command line. schtasks needs everything in one TR string.
+    cmd_line = f'"{python_exe}" "{tick_script}"'
+    # Delete any existing task first (idempotent reinstall)
+    subprocess.run(["schtasks", "/Delete", "/TN", _SCHED_TASK_NAME, "/F"],
+                   capture_output=True)
+    # Create: trigger every 1 minute, run indefinitely, no password needed
+    result = subprocess.run(
+        [
+            "schtasks", "/Create",
+            "/TN", _SCHED_TASK_NAME,
+            "/TR", cmd_line,
+            "/SC", "MINUTE",
+            "/MO", "1",
+            "/F",
+        ],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        print(f"[claude-q] scheduled task '{_SCHED_TASK_NAME}' installed.")
+        print("           Runs every 1 minute as your user account.")
+        print("           Check status: `claude -q scheduler status`")
+        print("           Remove:       `claude -q scheduler uninstall`")
+        return 0
+    print(f"[claude-q] schtasks /Create failed (rc={result.returncode}):",
+          file=sys.stderr)
+    print(result.stderr or result.stdout, file=sys.stderr)
+    return 2
+
+
+def _scheduler_uninstall() -> int:
+    import subprocess
+    result = subprocess.run(
+        ["schtasks", "/Delete", "/TN", _SCHED_TASK_NAME, "/F"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        print(f"[claude-q] scheduled task '{_SCHED_TASK_NAME}' removed.")
+        return 0
+    print(f"[claude-q] schtasks /Delete: task not installed or failed "
+          f"(rc={result.returncode})", file=sys.stderr)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
+    return 1
+
+
+def _scheduler_status() -> int:
+    import subprocess
+    result = subprocess.run(
+        ["schtasks", "/Query", "/TN", _SCHED_TASK_NAME, "/FO", "LIST", "/V"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print("[claude-q] scheduled task NOT installed.")
+        print("           Install with: `claude -q scheduler install`")
+        return 1
+    # print the key lines only for cleanliness
+    kept_keys = ("TaskName:", "Status:", "Last Run Time:", "Next Run Time:",
+                 "Last Result:", "Schedule Type:", "Task To Run:")
+    for line in result.stdout.splitlines():
+        ls = line.strip()
+        if any(ls.startswith(k) for k in kept_keys):
+            print("  " + ls)
+    # also print tail of the tick log if present
+    log_path = session.run_root() / "_scheduler_tick.log"
+    if log_path.exists():
+        print("")
+        print(f"  Recent ticks ({log_path}):")
+        try:
+            tail = log_path.read_text(encoding="utf-8").splitlines()[-5:]
+            for ln in tail:
+                print(f"    {ln}")
+        except Exception:
+            pass
+    return 0
+
+
 # ------------------------- subcommand: doctor -------------------------
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -582,6 +698,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_sessions = sub.add_parser("sessions", help="list all known sessions")
     p_sessions.set_defaults(func=cmd_sessions)
+
+    p_sched = sub.add_parser(
+        "scheduler",
+        help="manage the Windows Scheduled Task that watches "
+             "scheduled dispatches when no session is running",
+    )
+    p_sched.add_argument(
+        "action",
+        choices=("install", "uninstall", "status", "run-once"),
+        help="install / uninstall / status / run-once (manual sweep)",
+    )
+    p_sched.set_defaults(func=cmd_scheduler)
 
     p_doctor = sub.add_parser("doctor", help="run sanity checks")
     p_doctor.set_defaults(func=cmd_doctor)
