@@ -35,7 +35,8 @@ from idle_detector import IdleState
 class MonitorState:
     """Shared mutable state read by status_bar / terminal_relay."""
     idle: bool = False
-    queue_len: int = 0
+    queue_len: int = 0          # total pending (including scheduled-future)
+    ready_len: int = 0          # pending AND dispatchable now (schedule matured)
     last_dispatch_at: float = 0.0
     drift_detected: bool = False
     last_reasons: dict = None  # type: ignore[assignment]
@@ -98,6 +99,7 @@ class Monitor:
         return {
             "idle": self.state.idle,
             "queue_len": self.state.queue_len,
+            "ready_len": self.state.ready_len,
             "drift_detected": self.state.drift_detected,
             "last_reasons": self.state.last_reasons,
             "dispatched_total": self.state.dispatched_total,
@@ -132,8 +134,10 @@ class Monitor:
 
     def _tick(self) -> None:
         now = time.monotonic()
-        # update queue length
+        # update queue length (total pending; both scheduled-future and ready)
         self.state.queue_len = queue_store.pending_len(self.queue_path)
+        # track dispatch-ready (eligible NOW) — what monitor actually may send
+        self.state.ready_len = queue_store.dispatch_ready_len(self.queue_path)
 
         tail = self.pty_tail_fn()
         result = idle_detector.is_idle(
@@ -159,7 +163,10 @@ class Monitor:
             return
         if not result.idle:
             return
-        if self.state.queue_len <= 0:
+        # use ready_len (not queue_len) so scheduled-future entries don't
+        # trigger dispatch — they wait in the queue until their dispatch_at
+        # matures, then become "ready".
+        if self.state.ready_len <= 0:
             return
 
         # commit window: re-check after a short delay that idle still holds

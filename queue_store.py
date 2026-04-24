@@ -52,6 +52,9 @@ class QueueEntry:
     status: str = STATUS_PENDING
     sent_at: Optional[str] = None
     source: str = "queue-pane"
+    # --- scheduling fields (added v0.3.0) ---
+    dispatch_at: Optional[str] = None   # ISO timestamp; if set, dispatcher waits until this time
+    priority: int = 0                   # higher = dispatched first within the eligible set
 
     def to_line(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -92,39 +95,98 @@ def _write_all_atomic(path: Path, entries: Iterable[QueueEntry]) -> None:
         raise
 
 
-def push(path: Path, text: str, source: str = "queue-pane") -> str:
-    """Append a pending entry. Returns new id. O(1) append."""
+def push(
+    path: Path,
+    text: str,
+    source: str = "queue-pane",
+    dispatch_at: Optional[str] = None,
+    priority: int = 0,
+) -> str:
+    """Append a pending entry. Returns new id. O(1) append.
+
+    Parameters
+    ----------
+    dispatch_at : ISO-8601 timestamp. If set, the monitor will not
+        dispatch this entry until `now >= dispatch_at` (and Claude is
+        also idle).
+    priority : higher wins within the set of dispatch-eligible entries.
+        Default 0. /priority slash command sets this to 100.
+    """
     if not text.strip():
         raise ValueError("cannot queue empty text")
-    entry = QueueEntry(id=_new_id(), text=text, ts=datetime.now().isoformat(timespec="seconds"),
-                       source=source)
+    entry = QueueEntry(
+        id=_new_id(),
+        text=text,
+        ts=datetime.now().isoformat(timespec="seconds"),
+        source=source,
+        dispatch_at=dispatch_at,
+        priority=priority,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8", newline="\n") as f:
         f.write(entry.to_line() + "\n")
     return entry.id
 
 
-def peek_pending(path: Path) -> Optional[QueueEntry]:
-    for e in _read_all(path):
-        if e.status == STATUS_PENDING:
-            return e
-    return None
+def _is_dispatch_eligible(e: QueueEntry, now_iso: str) -> bool:
+    """Is this pending entry ready to be dispatched at now?"""
+    if e.status != STATUS_PENDING:
+        return False
+    if e.dispatch_at is None:
+        return True
+    return e.dispatch_at <= now_iso  # ISO-8601 strings sort lexicographically
 
 
-def pop_pending(path: Path) -> Optional[QueueEntry]:
-    """Flip the head pending entry to 'sent' and return it. Atomic."""
+def _rank(e: QueueEntry) -> tuple:
+    """Dispatch-order key: higher priority first, then earlier dispatch_at,
+    then earlier creation ts. Use negative priority so Python's tuple
+    sort (ascending) yields the correct order.
+    """
+    return (-e.priority, e.dispatch_at or "", e.ts)
+
+
+def peek_pending(path: Path, now_iso: Optional[str] = None) -> Optional[QueueEntry]:
+    """Return the NEXT entry that's eligible for dispatch at `now_iso`.
+
+    Selection: among all pending + dispatch-eligible entries, pick the
+    one with highest priority, earliest dispatch_at, earliest ts.
+    """
+    if now_iso is None:
+        now_iso = datetime.now().isoformat(timespec="seconds")
+    eligible = [e for e in _read_all(path) if _is_dispatch_eligible(e, now_iso)]
+    if not eligible:
+        return None
+    return min(eligible, key=_rank)
+
+
+def pop_pending(path: Path, now_iso: Optional[str] = None) -> Optional[QueueEntry]:
+    """Flip the next dispatch-eligible entry to 'sent' and return it.
+
+    Atomic. Respects scheduling (dispatch_at) and priority.
+    """
+    if now_iso is None:
+        now_iso = datetime.now().isoformat(timespec="seconds")
     all_entries = _read_all(path)
-    for e in all_entries:
-        if e.status == STATUS_PENDING:
-            e.status = STATUS_SENT
-            e.sent_at = datetime.now().isoformat(timespec="seconds")
-            _write_all_atomic(path, all_entries)
-            return QueueEntry(**asdict(e))  # return a copy
-    return None
+    eligible = [e for e in all_entries if _is_dispatch_eligible(e, now_iso)]
+    if not eligible:
+        return None
+    chosen = min(eligible, key=_rank)
+    chosen.status = STATUS_SENT
+    chosen.sent_at = datetime.now().isoformat(timespec="seconds")
+    _write_all_atomic(path, all_entries)
+    return QueueEntry(**asdict(chosen))
 
 
 def pending_len(path: Path) -> int:
+    """Total pending entries, regardless of schedule."""
     return sum(1 for e in _read_all(path) if e.status == STATUS_PENDING)
+
+
+def dispatch_ready_len(path: Path, now_iso: Optional[str] = None) -> int:
+    """Pending entries whose schedule has matured (dispatchable right now)."""
+    if now_iso is None:
+        now_iso = datetime.now().isoformat(timespec="seconds")
+    return sum(1 for e in _read_all(path) if _is_dispatch_eligible(e, now_iso))
 
 
 def list_all(path: Path) -> List[QueueEntry]:
@@ -179,7 +241,7 @@ def _self_test() -> int:
         head = peek_pending(p)
         assert head is not None and head.id == id1
 
-        # pop ordering
+        # pop ordering (FIFO among equal priority, no schedule)
         a = pop_pending(p)
         assert a is not None and a.id == id1 and a.status == STATUS_SENT
         assert pending_len(p) == 2
@@ -189,10 +251,9 @@ def _self_test() -> int:
         # drop head
         assert drop(p, id3) is True
         assert pending_len(p) == 0
-        # second drop same id: already dropped, not pending -> False
         assert drop(p, id3) is False
 
-        # clear: push 2 more then clear
+        # clear
         push(p, "four")
         push(p, "five")
         assert pending_len(p) == 2
@@ -212,6 +273,42 @@ def _self_test() -> int:
             assert False, "should have raised"
         except ValueError:
             pass
+
+    # --- scheduling tests ---
+    with _tf.TemporaryDirectory() as td:
+        p = Path(td) / "queue.jsonl"
+        # future dispatch_at should not be eligible
+        far_future = "2099-01-01T00:00:00"
+        near_past = "2000-01-01T00:00:00"
+        id_future = push(p, "future", dispatch_at=far_future)
+        id_past = push(p, "past", dispatch_at=near_past)
+        id_no_sched = push(p, "unscheduled")
+        # pending count includes all
+        assert pending_len(p) == 3
+        # but only 2 are dispatch-ready (past-scheduled + no-schedule)
+        assert dispatch_ready_len(p) == 2
+        # pop should pick earliest eligible (past-scheduled comes before no-sched
+        # because its dispatch_at '2000-01-01...' < empty string? No — empty
+        # string sorts first. So unscheduled pops first.)
+        first = pop_pending(p)
+        assert first is not None and first.id == id_no_sched, first
+        second = pop_pending(p)
+        assert second is not None and second.id == id_past
+        # future entry remains
+        assert pending_len(p) == 1
+        assert dispatch_ready_len(p) == 0
+        remaining = peek_pending(p)
+        assert remaining is None  # not eligible yet
+
+    # --- priority tests ---
+    with _tf.TemporaryDirectory() as td:
+        p = Path(td) / "queue.jsonl"
+        push(p, "normal-1", priority=0)
+        push(p, "normal-2", priority=0)
+        id_prio = push(p, "VIP", priority=100)
+        # VIP should pop first despite being pushed last
+        first = pop_pending(p)
+        assert first is not None and first.id == id_prio and first.text == "VIP"
 
     print("queue_store.py self-test: PASS")
     return 0
