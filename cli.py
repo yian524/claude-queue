@@ -27,6 +27,7 @@ import signal
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 # make local imports work when invoked via `python cli.py`
 _HERE = Path(__file__).resolve().parent
@@ -57,6 +58,26 @@ def _active_status_path() -> Path:
 def _active_session_path() -> Path:
     sid = session.require_active()
     return session.session_dir(sid) / "session.json"
+
+
+def _resolve_target_queue(sid_arg: Optional[str]) -> Path:
+    """Resolve the queue.jsonl path for user-supplied session arg.
+
+    Raises RuntimeError with a helpful message if the session can't be
+    resolved (so CLI sees a clean error).
+    """
+    if sid_arg:
+        sid = session.resolve_session(sid_arg)
+        if sid is None:
+            all_sids = session.list_sessions()
+            raise RuntimeError(
+                f"session {sid_arg!r} not found (ambiguous or missing). "
+                f"Run `claude -q sessions` to list. Known: "
+                f"{', '.join(all_sids[:3])}{'...' if len(all_sids) > 3 else ''}"
+            )
+        return session.session_dir(sid) / "queue.jsonl"
+    # default: active session
+    return _active_queue_path()
 
 
 # ------------------------- subcommand: start -------------------------
@@ -257,7 +278,7 @@ def cmd_add(args: argparse.Namespace) -> int:
     if not text:
         print("[claude-q] ERROR: empty message", file=sys.stderr)
         return 2
-    qpath = _active_queue_path()
+    qpath = _resolve_target_queue(getattr(args, "session", None))
     eid = queue_store.push(qpath, text, source="claude-q-add")
     _print_json({"ok": True, "id": eid, "queue_len": queue_store.pending_len(qpath)})
     return 0
@@ -330,24 +351,55 @@ def cmd_stop(args: argparse.Namespace) -> int:
 # ------------------------- subcommand: list -------------------------
 
 def cmd_list(args: argparse.Namespace) -> int:
-    qpath = _active_queue_path()
+    # --all-sessions: print queues from every session dir
+    if getattr(args, "all_sessions", False):
+        sids = session.list_sessions()
+        if not sids:
+            print("[claude-q] no sessions found")
+            return 0
+        total_entries = 0
+        total_pending = 0
+        for sid in sids:
+            qpath = session.session_dir(sid) / "queue.jsonl"
+            entries = queue_store.list_all(qpath)
+            pending = [e for e in entries if e.status == queue_store.STATUS_PENDING]
+            if not entries and not args.all:
+                continue
+            active_tag = " (active)" if sid == session.active_session() else ""
+            print(f"=== session {sid}{active_tag} ===")
+            print(f"    total={len(entries)} pending={len(pending)}")
+            rows = entries if args.all else pending
+            for e in rows[:10]:
+                preview = e.text if len(e.text) <= 60 else e.text[:57] + "..."
+                sched = f" @{e.dispatch_at}" if e.dispatch_at else ""
+                prio = " ★" if e.priority > 0 else ""
+                print(f"      [{e.status:<7}]{prio} {e.id}  {preview}{sched}")
+            if len(rows) > 10:
+                print(f"      ... +{len(rows) - 10} more")
+            total_entries += len(entries)
+            total_pending += len(pending)
+        print(f"[claude-q] sessions={len(sids)} total={total_entries} "
+              f"pending={total_pending}")
+        return 0
+
+    # single-session mode (default: active; --session overrides)
+    qpath = _resolve_target_queue(getattr(args, "session", None))
     entries = queue_store.list_all(qpath)
     pending = [e for e in entries if e.status == queue_store.STATUS_PENDING]
-    if args.all:
-        rows = entries
-    else:
-        rows = pending
+    rows = entries if args.all else pending
     print(f"[claude-q] total={len(entries)} pending={len(pending)}")
     for e in rows:
         preview = e.text if len(e.text) <= 80 else e.text[:77] + "..."
-        print(f"  [{e.status:<7}] {e.id}  {preview}")
+        sched = f" @{e.dispatch_at}" if e.dispatch_at else ""
+        prio = " ★" if e.priority > 0 else ""
+        print(f"  [{e.status:<7}]{prio} {e.id}  {preview}{sched}")
     return 0
 
 
 # ------------------------- subcommand: drop -------------------------
 
 def cmd_drop(args: argparse.Namespace) -> int:
-    qpath = _active_queue_path()
+    qpath = _resolve_target_queue(getattr(args, "session", None))
     ok = queue_store.drop(qpath, args.id)
     _print_json({"ok": ok, "id": args.id,
                  "queue_len": queue_store.pending_len(qpath)})
@@ -357,10 +409,33 @@ def cmd_drop(args: argparse.Namespace) -> int:
 # ------------------------- subcommand: clear -------------------------
 
 def cmd_clear(args: argparse.Namespace) -> int:
-    qpath = _active_queue_path()
+    qpath = _resolve_target_queue(getattr(args, "session", None))
     n = queue_store.clear(qpath)
     _print_json({"dropped": n,
                  "queue_len": queue_store.pending_len(qpath)})
+    return 0
+
+
+# ------------------------- subcommand: sessions -------------------------
+
+def cmd_sessions(args: argparse.Namespace) -> int:
+    """List every claude-q session the file system knows about."""
+    sids = session.list_sessions()
+    active = session.active_session()
+    if not sids:
+        print("[claude-q] no sessions found")
+        return 0
+    print(f"[claude-q] {len(sids)} session(s):")
+    for sid in sids:
+        st = session.read_session(sid)
+        qpath = session.session_dir(sid) / "queue.jsonl"
+        pending = queue_store.pending_len(qpath)
+        mark = "  <- ACTIVE" if sid == active else ""
+        if st is None:
+            print(f"  {sid}  pending={pending}  (no session.json){mark}")
+        else:
+            print(f"  {sid}  pending={pending}  pid={st.pid}  "
+                  f"started={st.started_at}{mark}")
     return 0
 
 
@@ -473,8 +548,10 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="wrap cmd.exe/sh instead of claude (for smoke testing)")
     p_start.set_defaults(func=cmd_start)
 
-    p_add = sub.add_parser("add", help="enqueue a message into the active session")
+    p_add = sub.add_parser("add", help="enqueue a message into a session")
     p_add.add_argument("text", nargs="+", help="message text (will be joined by spaces)")
+    p_add.add_argument("--session", metavar="SID",
+                       help="target session id (or unique prefix); default: active")
     p_add.set_defaults(func=cmd_add)
 
     p_status = sub.add_parser("status", help="show active session status")
@@ -486,14 +563,25 @@ def _build_parser() -> argparse.ArgumentParser:
     p_list = sub.add_parser("list", help="list queue entries")
     p_list.add_argument("--all", action="store_true",
                         help="include sent/dropped entries")
+    p_list.add_argument("--all-sessions", action="store_true",
+                        help="list queues for every session, not just active")
+    p_list.add_argument("--session", metavar="SID",
+                        help="target session id (or unique prefix); default: active")
     p_list.set_defaults(func=cmd_list)
 
     p_drop = sub.add_parser("drop", help="drop a pending entry by id")
     p_drop.add_argument("id")
+    p_drop.add_argument("--session", metavar="SID",
+                        help="target session id (or unique prefix); default: active")
     p_drop.set_defaults(func=cmd_drop)
 
     p_clear = sub.add_parser("clear", help="drop all pending entries")
+    p_clear.add_argument("--session", metavar="SID",
+                         help="target session id (or unique prefix); default: active")
     p_clear.set_defaults(func=cmd_clear)
+
+    p_sessions = sub.add_parser("sessions", help="list all known sessions")
+    p_sessions.set_defaults(func=cmd_sessions)
 
     p_doctor = sub.add_parser("doctor", help="run sanity checks")
     p_doctor.set_defaults(func=cmd_doctor)

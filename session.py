@@ -109,6 +109,30 @@ def list_sessions() -> list[str]:
     return sorted(p.name for p in root.iterdir() if p.is_dir())
 
 
+def resolve_session(sid_or_prefix: Optional[str]) -> Optional[str]:
+    """Resolve a user-supplied session argument to an actual session id.
+
+    Accepts:
+      - None                 -> falls back to active_session()
+      - full session id      -> returned as-is if dir exists
+      - prefix (e.g. 'aaa')  -> returns unique match if exactly one
+      - 'active' or ''       -> same as None
+
+    Returns None if not found or ambiguous; caller should report.
+    """
+    if not sid_or_prefix or sid_or_prefix == "active":
+        return active_session()
+    sessions = list_sessions()
+    # exact match wins
+    if sid_or_prefix in sessions:
+        return sid_or_prefix
+    # prefix match
+    matches = [s for s in sessions if s.startswith(sid_or_prefix)]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
 if __name__ == "__main__":
     # self-test
     sid = new_session_id()
