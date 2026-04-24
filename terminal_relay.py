@@ -253,40 +253,11 @@ class TerminalRelay:
                 self._send_to_pty(b"\n")
             return
 
-        # ---- Arrow/function keys etc. (VT sequence precomputed) ----
-        if k.vt is not None:
-            if self._mode == "direct":
-                self._debug(f"vt sent={k.vt!r} vk=0x{k.vkey:02X}")
-                self._send_to_pty(k.vt.encode())
-            # ignore in queue mode for MVP
-            return
-
-        # ---- Backspace ----
-        if k.vkey == VK_BACK:
-            if self._mode == "queue":
-                # Delete char BEFORE cursor (classic backspace)
-                if self._cursor_pos > 0:
-                    del self._queue_buf[self._cursor_pos - 1]
-                    self._cursor_pos -= 1
-                    self._refresh_dropdown()
-                    self._update_input_line()
-            else:
-                self._debug("backspace sent")
-                self._send_to_pty(b"\x7f")
-            return
-
-        # ---- Delete (delete char AT cursor) ----
-        if k.vkey == VK_DELETE:
-            if self._mode == "queue":
-                if self._cursor_pos < len(self._queue_buf):
-                    del self._queue_buf[self._cursor_pos]
-                    self._refresh_dropdown()
-                    self._update_input_line()
-            else:
-                self._send_to_pty(b"\x1b[3~")
-            return
-
-        # ---- Left / Right / Home / End inside queue input ----
+        # ---- Queue-mode cursor navigation & edit keys ----
+        # MUST come before the generic `k.vt is not None` block below,
+        # because Left/Right/Home/End/Delete all have `k.vt` set (they're
+        # translated to VT sequences for direct-mode passthrough), and
+        # that block returns early in queue mode.
         if self._mode == "queue":
             if k.vkey == VK_LEFT:
                 if self._cursor_pos > 0:
@@ -308,6 +279,35 @@ class TerminalRelay:
                     self._cursor_pos = len(self._queue_buf)
                     self._update_input_line()
                 return
+            if k.vkey == VK_DELETE:
+                if self._cursor_pos < len(self._queue_buf):
+                    del self._queue_buf[self._cursor_pos]
+                    self._refresh_dropdown()
+                    self._update_input_line()
+                return
+            if k.vkey == VK_BACK:
+                if self._cursor_pos > 0:
+                    del self._queue_buf[self._cursor_pos - 1]
+                    self._cursor_pos -= 1
+                    self._refresh_dropdown()
+                    self._update_input_line()
+                return
+
+        # ---- Arrow/function keys etc. (direct-mode passthrough) ----
+        if k.vt is not None:
+            if self._mode == "direct":
+                self._debug(f"vt sent={k.vt!r} vk=0x{k.vkey:02X}")
+                self._send_to_pty(k.vt.encode())
+            return
+
+        # ---- Backspace / Delete in DIRECT mode ----
+        if k.vkey == VK_BACK:
+            self._debug("backspace sent")
+            self._send_to_pty(b"\x7f")
+            return
+        if k.vkey == VK_DELETE:
+            self._send_to_pty(b"\x1b[3~")
+            return
 
         # ---- Tab ----
         if k.vkey == VK_TAB:

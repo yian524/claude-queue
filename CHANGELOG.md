@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-04-24
+
+### Fixed
+- **v0.4.1's arrow-key fix was dead code.** The `_handle_key` flow had
+  an early-return for `k.vt is not None` (arrow / function keys) that
+  fired in queue mode too, returning before the new cursor-navigation
+  code could run. Moved the queue-mode Left/Right/Home/End/Delete/
+  Backspace handlers ABOVE the VT passthrough block so they actually
+  execute. In-queue editing now works as intended.
+
 ## [0.4.1] - 2026-04-24
 
 ### Added
