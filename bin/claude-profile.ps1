@@ -1,15 +1,29 @@
-# Microsoft.PowerShell_profile.ps1
+# claude wrapper function - append this to your PowerShell $PROFILE
 # Managed by claude-q installer (2026-04-24)
 #
-# This PROFILE loads automatically on every PowerShell startup.
-# PowerShell functions take priority over PATH-resolved executables,
-# so defining `claude` here cleanly intercepts all `claude ...`
-# invocations without any PATH ordering tricks.
+# Why in $PROFILE: PowerShell functions take priority over anything
+# resolved via $PATH, so this cleanly intercepts `claude ...`
+# invocations without requiring fragile PATH ordering.
 
 function claude {
-    $realClaude = "$env:USERPROFILE\.local\bin\claude.exe"
+    # Path to the claude-q wrapper (adjust if you cloned elsewhere)
     $wrapperPy  = "$env:USERPROFILE\.claude\scripts\claude-queue\.venv\Scripts\python.exe"
     $wrapperCli = "$env:USERPROFILE\.claude\scripts\claude-queue\cli.py"
+
+    # Resolve the real claude.exe dynamically so this profile works
+    # regardless of where the user installed Claude Code (pipx, manual,
+    # winget, etc.). Skip any hit that would re-invoke this function
+    # via a claude.cmd shim inside the claude-queue project.
+    $realClaude = Get-Command -Name claude.exe -CommandType Application -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Source -notlike '*claude-queue*' -and $_.Source -notlike '*claude-q\bin*' } |
+                  Select-Object -First 1 -ExpandProperty Source
+
+    if (-not $realClaude) {
+        Write-Host "[claude-q] ERROR: could not find claude.exe on PATH." -ForegroundColor Red
+        Write-Host "           Install Claude Code CLI first:" -ForegroundColor Red
+        Write-Host "           https://github.com/anthropics/claude-code" -ForegroundColor Red
+        return
+    }
 
     if ($args.Count -gt 0 -and $args[0] -eq '-q') {
         if ($args.Count -eq 1) {
