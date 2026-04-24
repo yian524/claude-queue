@@ -65,7 +65,7 @@ def active_session() -> Optional[str]:
 def require_active() -> str:
     sid = active_session()
     if not sid:
-        raise RuntimeError("No active claude-q session. Run `claude-q start` first.")
+        raise RuntimeError("No active claude -q session. Run `claude -q start` first.")
     return sid
 
 

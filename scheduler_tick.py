@@ -129,7 +129,7 @@ def notify_if_overdue(summary: dict) -> None:
         return
     try:
         import subprocess
-        text = (f"claude-q: {summary['overdue_entries']} scheduled "
+        text = (f"claude -q: {summary['overdue_entries']} scheduled "
                 f"message(s) are ready. Run `claude -q` to process.")
         username = os.environ.get("USERNAME", "*")
         subprocess.run(

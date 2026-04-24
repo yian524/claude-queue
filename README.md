@@ -38,37 +38,20 @@ moment Claude's prompt becomes empty again.
 
 ## What it looks like
 
-The queue UI in action (alt-screen, fully isolated from Claude's view):
+The alt-screen queue UI with the slash-command dropdown open (type
+`/` while in queue mode to filter; `↑↓` navigate, `Tab` / `Enter`
+picks a template, `Esc` closes):
 
-```text
-╔══════════════════════════════════════════════════════════════════════════╗
-║  [claude -q]  QUEUE INPUT                       session: 20260424T193026 ║
-╠══════════════════════════════════════════════════════════════════════════╣
-║  Pending (2):                                                            ║
-║     1. run the test suite on dept-B branch                        ASAP   ║
-║     2. summarise today's decisions in one paragraph        · in 5m 0s    ║
-╠══════════════════════════════════════════════════════════════════════════╣
-║  Enter=queue   Esc / Ctrl+Q=cancel   Backspace=delete                    ║
-║  Waiting: Claude is busy                                                 ║
-║                                                                          ║
-║                                                                          ║
-║   Commands  (↑↓ select, Tab/Enter pick, Esc close)                       ║
-║    ► /wait <duration> <message>   Dispatch after duration                ║
-║      /at <time> <message>         Dispatch at absolute time              ║
-║      /priority <message>          Jump ahead of normal queue             ║
-║      /now <message>               WARNING: send immediately              ║
-║                                                                          ║
-║  > /w                                                                    ║
-╚══════════════════════════════════════════════════════════════════════════╝
-```
+![claude -q queue UI with slash-command dropdown](docs/screenshots/queue-ui.png)
 
 When you hit Enter the UI vanishes and Claude's view comes back
-untouched. The queued message is sent the moment Claude's prompt is
-empty again.
+untouched. The queued message is dispatched the moment Claude's
+prompt is empty again.
 
-> 📸 Real-terminal screenshots live in
-> [`docs/screenshots/`](./docs/screenshots/). Contributions welcome —
-> see that folder's README for the shots we'd like to collect.
+> 📸 More shots welcome — see
+> [`docs/screenshots/README.md`](./docs/screenshots/README.md) for the
+> ones we'd still like to collect (`dropdown.png`, `direct-mode.png`,
+> `error-handling.png`).
 
 ---
 

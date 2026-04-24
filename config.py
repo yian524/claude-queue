@@ -71,7 +71,7 @@ def load_config() -> Config:
         with cfg_path.open("rb") as f:
             data = tomllib.load(f)
     except Exception as e:
-        print(f"[claude-q] warning: failed to parse {cfg_path}: {e}", file=sys.stderr)
+        print(f"[claude -q] warning: failed to parse {cfg_path}: {e}", file=sys.stderr)
         return cfg
     fields = {f for f in asdict(cfg).keys()}
     overrides = {k: v for k, v in data.items() if k in fields}

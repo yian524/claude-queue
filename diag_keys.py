@@ -15,7 +15,7 @@ except ImportError:
     sys.exit(1)
 
 print("=" * 60)
-print("claude-q 鍵盤診斷工具")
+print("claude -q 鍵盤診斷工具")
 print("=" * 60)
 print("按下以下按鍵，觀察 hex code：")
 print("  1. Enter   (應該看到 \\r = 0x0d)")
