@@ -523,6 +523,21 @@ def cmd_log(args: argparse.Namespace) -> int:
             print()
         return 0
 
+    if args.errors:
+        err_log = root / "relay_errors.log"
+        if not err_log.exists():
+            print(f"[claude -q] no relay errors logged (file not found: {err_log})")
+            return 0
+        text = err_log.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()
+        if args.tail is not None and args.tail > 0 and len(lines) > args.tail:
+            lines = lines[-args.tail:]
+            print(f"[claude -q] (showing last {args.tail} of {len(text.splitlines())} lines)")
+        print(f"\x1b[36m=== {err_log} ===\x1b[0m")
+        for ln in lines:
+            print(ln)
+        return 0
+
     # default: list recent sessions
     print(f"[claude -q] Recent sessions under {root}:")
     for p in dirs[:10]:
@@ -530,10 +545,18 @@ def cmd_log(args: argparse.Namespace) -> int:
         size = f"{log_path.stat().st_size / 1024:.1f} KB" if log_path.exists() else "(no log)"
         ts = _dt.datetime.fromtimestamp(p.stat().st_mtime).strftime("%H:%M:%S")
         print(f"  {ts}  {p.name}  {size}")
+    # also note whether a relay-error log exists (rare, diagnostic)
+    err_log = root / "relay_errors.log"
+    if err_log.exists():
+        err_size = f"{err_log.stat().st_size / 1024:.1f} KB"
+        print()
+        print(f"\x1b[33m[claude -q] relay errors logged: {err_size} "
+              f"-> `claude -q log --errors` to view\x1b[0m")
     print()
     print("Dump:     claude -q log --latest")
     print("          claude -q log --session <id or prefix>")
     print("          claude -q log --since 18:00")
+    print("          claude -q log --errors            (relay crashes)")
     print("Add      --tail N   to show only last N lines")
     return 0
 
@@ -813,6 +836,8 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="dump all sessions modified after HH:MM today")
     p_log.add_argument("--tail", type=int, default=None, metavar="N",
                        help="only show last N lines of the log")
+    p_log.add_argument("--errors", action="store_true",
+                       help="dump relay crash log (relay_errors.log)")
     p_log.set_defaults(func=cmd_log)
 
     p_sched = sub.add_parser(

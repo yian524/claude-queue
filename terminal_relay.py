@@ -66,6 +66,19 @@ _ALT_EXIT = b"\x1b[?1049l"
 # debug log: set CLAUDE_Q_DEBUG=1 to write every keystroke to a file
 _DEBUG = os.environ.get("CLAUDE_Q_DEBUG", "") == "1"
 _DEBUG_LOG = Path(os.path.expanduser("~/.claude/run/claude-q/relay_debug.log"))
+# error log: always written on exception paths regardless of _DEBUG. Gives
+# us postmortem tracebacks for rare crashes without spamming the per-key log.
+_ERROR_LOG = Path(os.path.expanduser("~/.claude/run/claude-q/relay_errors.log"))
+
+
+def _log_error(msg: str) -> None:
+    try:
+        _ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with _ERROR_LOG.open("a", encoding="utf-8") as f:
+            f.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+            f.write(msg.rstrip() + "\n")
+    except Exception:
+        pass
 
 try:
     import win_console_input as wci
@@ -153,6 +166,7 @@ class TerminalRelay:
     # ------------------------- input loop -------------------------
 
     def _loop(self) -> None:
+        import traceback as _tb
         try:
             with wci.ConsoleInput() as ci:
                 self._debug("ConsoleInput opened (ReadConsoleInputW mode)")
@@ -160,10 +174,51 @@ class TerminalRelay:
                     k = ci.read_key(timeout_s=0.1)
                     if k is None:
                         continue
-                    self._handle_key(k)
+                    # Isolate per-key errors so one bad keystroke (e.g. a
+                    # render/parse edge case) doesn't kill the whole session.
+                    # Full traceback is logged to the debug file; user sees a
+                    # single-line notice via window title + the queue UI note.
+                    try:
+                        self._handle_key(k)
+                    except Exception as e:
+                        tb = _tb.format_exc()
+                        self._debug(f"key handler error: {type(e).__name__}: {e}")
+                        _log_error(
+                            f"key handler error: {type(e).__name__}: {e}\n"
+                            f"mode={self._mode} cursor={self._cursor_pos} "
+                            f"buf={''.join(self._queue_buf)!r} "
+                            f"dropdown_active={self._dropdown_active} "
+                            f"dropdown_sel={self._dropdown_selected} "
+                            f"dropdown_items={len(self._dropdown_items)}\n"
+                            f"key: vkey=0x{getattr(k, 'vkey', 0):02X} "
+                            f"vt={getattr(k, 'vt', None)!r} "
+                            f"text={getattr(k, 'text', None)!r} "
+                            f"ctrl={getattr(k, 'ctrl', None)} "
+                            f"alt={getattr(k, 'alt', None)} "
+                            f"shift={getattr(k, 'shift', None)}\n"
+                            f"{tb}"
+                        )
+                        try:
+                            self._set_title(f"[claude -q] key error: {e}")
+                        except Exception:
+                            pass
+                        # If we're in queue mode, keep the UI intact with an
+                        # inline note so the user knows something went wrong.
+                        if self._mode == "queue":
+                            try:
+                                self._render_queue_ui(
+                                    note=f"internal error: {type(e).__name__}: {e}"
+                                )
+                            except Exception:
+                                pass
         except Exception as e:
+            tb = _tb.format_exc()
             self._debug(f"relay loop crashed: {type(e).__name__}: {e}")
-            sys.stdout.write(f"\r\n\x1b[31m[claude -q] relay loop crashed: {e}\x1b[0m\r\n")
+            _log_error(f"relay loop crashed: {type(e).__name__}: {e}\n{tb}")
+            sys.stdout.write(
+                f"\r\n\x1b[31m[claude -q] relay loop crashed: {e}\x1b[0m\r\n"
+                f"\x1b[33m  traceback logged to {_ERROR_LOG}\x1b[0m\r\n"
+            )
             sys.stdout.flush()
 
     def _handle_key(self, k) -> None:

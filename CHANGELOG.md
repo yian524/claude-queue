@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-04-24
+
+### Fixed
+- **Relay loop no longer dies on a single bad keystroke.** A user hitting
+  `/0` + Enter in queue mode hit a code path that raised
+  `list assignment index out of range`; the previous loop caught the
+  exception at the TOP level, so one key error killed the whole input
+  relay and the session became unresponsive. Now each `_handle_key`
+  call is wrapped in its own try/except — a bad key is isolated, logged,
+  and the loop continues.
+
+### Added
+- **`~/.claude/run/claude-q/relay_errors.log`** — tracebacks for both
+  per-key errors and fatal relay crashes are written here, along with
+  enough state (mode / cursor / buffer / dropdown / key event) to
+  reproduce. Written unconditionally (not gated behind
+  `CLAUDE_Q_DEBUG`).
+- **`claude -q log --errors`** — dump that error log without hunting
+  for the file. The default `claude -q log` listing also shows a
+  yellow notice when the error log is non-empty.
+
 ## [0.4.5] - 2026-04-24
 
 ### Added
