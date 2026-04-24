@@ -56,7 +56,7 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pip install pywinpty prompt_toolkit pytest
 ```
 
-Add the `.cmd` shim to your `PATH` so `claude-q` works globally:
+Add the `bin/` directory to your `PATH` so the wrapper works globally:
 
 ```powershell
 [Environment]::SetEnvironmentVariable(
@@ -65,13 +65,18 @@ Add the `.cmd` shim to your `PATH` so `claude-q` works globally:
   "User")
 ```
 
-(Place `bin\claude-q.cmd` and `bin\claude-q-add.cmd` under
-`~/.claude/bin/`; see the `bin/` examples in this repo.)
+Copy the shims from this repo's `bin/` directory to
+`~/.claude/bin/`. The key file is `claude.cmd` — a drop-in replacement
+for the stock `claude` command that transparently forwards anything
+without `-q` to the real `claude.exe`, and routes `claude -q ...` to the
+wrapper. `~/.claude/bin/` must come before the directory containing
+the real `claude.exe` on your PATH (it does by default after the
+command above).
 
 ### Verify
 
 ```powershell
-claude-q doctor
+claude -q doctor
 ```
 
 All eight checks should report `OK`.
@@ -79,11 +84,19 @@ All eight checks should report `OK`.
 ### Run
 
 ```powershell
-claude-q
+claude -q
 ```
 
 Claude Code launches as usual. The difference: press `Ctrl+Q` mid-response
 to drop into the queue UI.
+
+> **Tip:** every other `claude <subcommand>` still works unchanged — the
+> shim only intercepts when the first argument is `-q`. So `claude
+> --version`, `claude --resume ...`, `/mcp`, etc. all behave normally.
+
+> **Backward-compat:** the older `claude-q` / `claude-q-add` commands
+> still exist as aliases if you already had scripts or muscle memory
+> using them.
 
 ---
 
@@ -108,10 +121,10 @@ to drop into the queue UI.
 
 | Command | Purpose |
 |---|---|
-| `claude-q` | Start the wrapped session |
+| `claude -q` | Start the wrapped session |
 | `claude-q start --cmd <path>` | Wrap a different executable (default: `claude`) |
 | `claude-q start --dry-run` | Wrap `cmd.exe` for smoke-testing |
-| `claude-q add "<text>"` | Append to the active queue from another terminal |
+| `claude -q add "<text>"` | Append to the active queue from another terminal |
 | `claude-q list [--all]` | Show pending (or all) queue entries |
 | `claude-q drop <id>` | Drop one pending entry |
 | `claude-q clear` | Drop every pending entry |

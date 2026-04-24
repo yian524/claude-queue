@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **Command syntax: `claude-q` → `claude -q`.** Added a `claude.cmd`
+  shim that sits earlier on `PATH` than the real `claude.exe` and
+  transparently forwards anything without a `-q` first argument to the
+  real binary. Now you type `claude -q` like any other subcommand
+  instead of remembering a separate binary name.
+- `claude-q` / `claude-q-add` remain as backward-compatible aliases.
+
+### Fixed
+- `Ctrl+Enter` / `Shift+Enter` / `Alt+Enter` now insert a newline in the
+  input box instead of submitting. Plain `Enter` still submits.
+- Queue UI cursor now parks inside the input box instead of below the
+  box after rendering.
+
 ## [0.2.0] - 2026-04-24
 
 ### Changed
