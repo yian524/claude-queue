@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-04-24
+
+### Changed
+- Dropped `/cancel` from the slash-command set. Esc and Ctrl+Q already
+  cancel queue-mode input, so the extra verb was clutter. Typing
+  `/cancel` now shows "unknown command".
+
+### Fixed
+- Queue-mode UI: cursor occasionally landed outside the input box after
+  rapid keypresses. Each rendered line now prefixes `\x1b[K` (clear
+  line) as a defensive measure, and `\x1b[H\x1b[J` replaces `\x1b[2J`
+  for a slightly more conservative clear. Reduces rendering glitches
+  on Windows Terminal under fast input.
+
 ## [0.3.0] - 2026-04-24
 
 ### Added

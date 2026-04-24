@@ -395,18 +395,19 @@ class TerminalRelay:
         if isinstance(parsed, _slash.HelpRequest):
             self._render_queue_ui(note=self._help_text())
             return
-        if isinstance(parsed, _slash.CancelRequest):
-            self._cancel_queue_input()
-            return
+        # (CancelRequest removed in v0.3.1 — Esc / Ctrl+Q already cancel)
 
         # QueueRequest or ForceSendRequest: exit mode and push/send
         self._exit_queue_mode(push=True, parsed=parsed)
 
     @staticmethod
     def _help_text() -> str:
-        """One-line help shown in queue UI when user types /help."""
+        """One-line help shown in queue UI when user types /help.
+
+        /cancel is not listed — Esc / Ctrl+Q cancel queue mode directly.
+        """
         return ("/wait <dur> msg | /at <time> msg | /priority msg | "
-                "/now msg | /cancel | /help")
+                "/now msg | /help  (Esc or Ctrl+Q to cancel)")
 
     def _cancel_queue_input(self, silent: bool = False) -> None:
         self._exit_queue_mode(push=False)
@@ -436,13 +437,18 @@ class TerminalRelay:
         row = 0
 
         def add(line: str) -> None:
+            """Append a rendered line. Each line is prefixed with \\x1b[K to
+            clear anything that might have been on that row (defensive — in
+            case a prior frame left artefacts that the screen-clear missed).
+            """
             nonlocal row
-            out.append(line + "\r\n")
+            out.append("\x1b[K" + line + "\r\n")
             row += 1
 
-        # Hide cursor during draw to avoid flicker
+        # Hide cursor during draw to avoid flicker + any stale glyph
         out.append("\x1b[?25l")
-        out.append("\x1b[H\x1b[2J")  # home + clear
+        # Home + erase-to-end-of-screen (safer than \x1b[2J on some terms)
+        out.append("\x1b[H\x1b[J")
 
         # top banner (yellow)
         add("\x1b[1;33m╔" + "═" * (cols - 2) + "╗\x1b[0m")

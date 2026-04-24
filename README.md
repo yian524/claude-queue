@@ -153,11 +153,10 @@ or `Enter` picks the template, `Esc` closes the dropdown.
 | `/at <time> <msg>` | Dispatch at `<time>` (`14:30`, `14:30:00`, or `YYYY-MM-DD HH:MM`) |
 | `/priority <msg>` | Push to the front of the queue (priority 100) |
 | `/now <msg>` | ⚠️ Send directly to Claude, bypass idle wait (may interrupt) |
-| `/cancel` | Discard input, leave queue mode |
 | `/help` | Show this command list |
 
-Plain text (no leading `/`) behaves as before: queued, dispatched ASAP
-when Claude idles.
+To cancel the current queue input press **Esc** or **Ctrl+Q**. Plain
+text (no leading `/`) is queued and dispatched ASAP when Claude idles.
 
 ## Persistent scheduling (optional)
 

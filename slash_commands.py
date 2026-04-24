@@ -76,6 +76,7 @@ ParseResult = Union[QueueRequest, ForceSendRequest, CancelRequest,
 # ============================= command metadata =============================
 
 # Shown to dropdown UI; order matters for display.
+# /cancel is intentionally omitted: Esc and Ctrl+Q already cancel.
 COMMANDS: list[dict] = [
     {
         "name": "/wait",
@@ -96,11 +97,6 @@ COMMANDS: list[dict] = [
         "name": "/now",
         "template": "/now <message>",
         "summary": "WARNING: send immediately, interrupts Claude",
-    },
-    {
-        "name": "/cancel",
-        "template": "/cancel",
-        "summary": "Discard this input, back to direct mode",
     },
     {
         "name": "/help",
@@ -143,8 +139,6 @@ def parse(raw: str) -> ParseResult:
 
     if cmd == "/help":
         return HelpRequest()
-    if cmd == "/cancel":
-        return CancelRequest()
     if cmd == "/priority":
         if not rest.strip():
             return ParseError("/priority needs a message")
@@ -210,9 +204,10 @@ def _self_test() -> int:
     assert isinstance(r, QueueRequest) and r.text == "hello world"
     assert r.dispatch_at is None and r.priority == 0
 
-    # /help /cancel
+    # /help (dropdown-visible)
     assert isinstance(parse("/help"), HelpRequest)
-    assert isinstance(parse("/cancel"), CancelRequest)
+    # /cancel was removed in v0.3.1 — Esc / Ctrl+Q handle cancellation
+    assert isinstance(parse("/cancel"), ParseError)
 
     # /priority
     r = parse("/priority pick me first")
