@@ -40,7 +40,10 @@ class Config:
 
     # --- dispatch safety ---
     dispatch_commit_delay_s: float = 0.05  # re-verify idle right before send
-    post_dispatch_backoff_s: float = 1.0   # give claude a moment to enter busy
+    # Minimum gap between two consecutive dispatches. Combined with
+    # `saw_busy_since_dispatch` latch, this is the defense-in-depth against
+    # "dispatch two queue items so fast Claude concatenates them".
+    post_dispatch_backoff_s: float = 3.0
 
     # --- pty knobs ---
     pty_read_chunk: int = 4096

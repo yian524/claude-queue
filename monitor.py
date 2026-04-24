@@ -38,6 +38,11 @@ class MonitorState:
     queue_len: int = 0          # total pending (including scheduled-future)
     ready_len: int = 0          # pending AND dispatchable now (schedule matured)
     last_dispatch_at: float = 0.0
+    # Has Claude actually entered the "busy" state since we last dispatched?
+    # Used to prevent back-to-back dispatches when Claude hasn't caught up
+    # to the previous one yet (race: idle detector briefly says True
+    # because Claude's busy marker hasn't surfaced in the tail buffer yet).
+    saw_busy_since_dispatch: bool = True  # True on startup (no prior dispatch)
     drift_detected: bool = False
     last_reasons: dict = None  # type: ignore[assignment]
     dispatched_total: int = 0
@@ -161,6 +166,14 @@ class Monitor:
         self.state.drift_detected = result.drift_detected
         self.state.last_reasons = result.reasons
 
+        # The moment Claude goes non-idle AFTER we dispatched, we know
+        # our message landed and Claude is processing it. Remember this
+        # so the next dispatch can proceed confidently.
+        if not result.idle and not self.state.saw_busy_since_dispatch:
+            self.state.saw_busy_since_dispatch = True
+            self._logger.info("confirmed Claude went busy after dispatch; "
+                              "cleared saw_busy_since_dispatch latch")
+
         # don't dispatch during startup grace, during queue mode, or within
         # post_dispatch_backoff of the last send
         # Log blocking reasons ONLY when we have ready entries; this is
@@ -200,6 +213,25 @@ class Monitor:
             return
         if not result.idle:
             return
+        # Critical race guard: after we dispatch, require that Claude was
+        # OBSERVED busy at least once before we allow another dispatch.
+        # Otherwise the idle detector can briefly say "idle=True" for a
+        # moment right after our write because Claude's busy indicator
+        # hasn't propagated through the PTY tail yet, causing us to
+        # dispatch a second queued entry immediately — which Claude
+        # then concatenates with the first.
+        if not self.state.saw_busy_since_dispatch:
+            # safety fallback: if too much time has passed and Claude still
+            # looks idle (i.e. our previous write probably never reached
+            # Claude — e.g. dispatch payload was empty), release the latch
+            # so we don't stall the queue forever.
+            stale_s = now - self.state.last_dispatch_at
+            if stale_s < 15.0:
+                return
+            self._logger.info(
+                f"stale latch cleared after {stale_s:.0f}s idle post-dispatch"
+            )
+            self.state.saw_busy_since_dispatch = True
         # use ready_len (not queue_len) so scheduled-future entries don't
         # trigger dispatch — they wait in the queue until their dispatch_at
         # matures, then become "ready".
@@ -232,6 +264,9 @@ class Monitor:
             self.pty_write_fn(payload)
             self.state.last_dispatch_at = now2
             self.state.dispatched_total += 1
+            # Arm the "must see busy" latch: next dispatch is held until
+            # Claude actually enters busy state after this one.
+            self.state.saw_busy_since_dispatch = False
             self._logger.info(f"dispatched id={entry.id} text_preview={entry.text[:60]!r}")
         except Exception as e:
             self._logger.error(f"dispatch write failed for id={entry.id}: {e}")

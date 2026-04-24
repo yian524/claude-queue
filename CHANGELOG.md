@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-24
+
+### Fixed
+- **Two queued entries dispatching back-to-back before Claude noticed the
+  first one, concatenating into a single garbled prompt.** Root cause:
+  `post_dispatch_backoff_s` was 1.0s but Claude Code's busy marker
+  (`✻`, `Swirling…`, etc.) can take >1s to appear in the PTY tail after
+  we write to it. During that window the idle detector still saw the
+  PRE-dispatch idle state, so the monitor happily dispatched the next
+  ready entry too.
+  - Added a `saw_busy_since_dispatch` latch on `MonitorState`. After
+    each dispatch, the latch is armed (False). It clears the instant
+    `is_idle()` returns False (Claude confirmed it's processing).
+    Subsequent dispatches are blocked until the latch clears.
+  - 15-second stale-latch release: if Claude never goes busy after our
+    dispatch (perhaps the payload was empty or got lost), we release
+    the latch so the queue doesn't stall forever.
+  - `post_dispatch_backoff_s` bumped 1.0s → 3.0s as belt-and-braces.
+
+### Added
+- CJK-aware cursor positioning in the queue-mode input box. Previously
+  each Chinese character counted as 1 column for cursor math but rendered
+  as 2 columns, so the cursor drifted left of the actual end of input
+  whenever the buffer contained CJK. New `_visual_width()` helper uses
+  `unicodedata.east_asian_width` to count W/F chars as 2 cols.
+
 ## [0.3.8] - 2026-04-24
 
 ### Fixed
