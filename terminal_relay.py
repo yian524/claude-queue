@@ -293,9 +293,10 @@ class TerminalRelay:
     def _render_queue_ui(self, note: str = "") -> None:
         """Draw the full queue UI on the alt screen.
 
-        Uses box-drawing characters for a clear visual boundary. After this
-        runs the cursor is positioned at the end of the input line so
-        subsequent keystrokes can just append there.
+        Tracks the row of the input line as it builds, and at the end emits
+        an explicit cursor-position sequence so the terminal cursor ends up
+        at the end of the user's input buffer (inside the box) — not stranded
+        at the bottom-left of the screen below the box.
         """
         try:
             cols = max(60, shutil.get_terminal_size((80, 24)).columns)
@@ -309,55 +310,86 @@ class TerminalRelay:
 
         sid = (self.session_id or "(no-session)")[:30]
         out: list[str] = []
+        row = 0
+
+        def add(line: str) -> None:
+            nonlocal row
+            out.append(line + "\r\n")
+            row += 1
+
+        # Hide cursor during draw to avoid flicker
+        out.append("\x1b[?25l")
         out.append("\x1b[H\x1b[2J")  # home + clear
-        # top banner
-        out.append("\x1b[1;33m")
-        out.append("╔" + "═" * (cols - 2) + "╗\r\n")
+
+        # top banner (yellow)
+        add("\x1b[1;33m╔" + "═" * (cols - 2) + "╗\x1b[0m")
         title = "  [claude-q]  QUEUE INPUT"
         right = f"session: {sid}  "
         gap = cols - 2 - len(title) - len(right)
-        out.append("║" + title + " " * max(0, gap) + right + "║\r\n")
-        out.append("╠" + "═" * (cols - 2) + "╣\r\n")
-        out.append("\x1b[0m")
+        add("\x1b[1;33m║\x1b[0m" + title + " " * max(0, gap) + right
+            + "\x1b[1;33m║\x1b[0m")
+        add("\x1b[1;33m╠" + "═" * (cols - 2) + "╣\x1b[0m")
 
-        # pending list
-        out.append(f"\x1b[36m║  Pending ({len(pending)}):\x1b[0m")
-        out.append(" " * (cols - 2 - len(f"  Pending ({len(pending)}):")) + "\x1b[36m║\x1b[0m\r\n")
+        # pending list (cyan)
+        header = f"  Pending ({len(pending)}):"
+        add("\x1b[36m║\x1b[0m" + header + " " * max(0, cols - 2 - len(header))
+            + "\x1b[36m║\x1b[0m")
         shown = pending[-8:]
-        for i, e in enumerate(shown, start=max(1, len(pending) - 7)):
-            preview = e.text.replace("\n", " ")
-            if len(preview) > cols - 12:
-                preview = preview[:cols - 15] + "..."
-            line = f"    {i:>2}. {preview}"
-            pad = cols - 2 - len(line)
-            out.append("\x1b[36m║\x1b[0m" + line + " " * max(0, pad) + "\x1b[36m║\x1b[0m\r\n")
-        if not pending:
+        if shown:
+            start_idx = max(1, len(pending) - 7)
+            for i, e in enumerate(shown, start=start_idx):
+                preview = e.text.replace("\n", " ")
+                if len(preview) > cols - 12:
+                    preview = preview[:cols - 15] + "..."
+                line = f"    {i:>2}. {preview}"
+                pad = cols - 2 - len(line)
+                add("\x1b[36m║\x1b[0m" + line + " " * max(0, pad)
+                    + "\x1b[36m║\x1b[0m")
+        else:
             line = "    (empty)"
             pad = cols - 2 - len(line)
-            out.append("\x1b[36m║\x1b[0m\x1b[2m" + line + " " * max(0, pad) + "\x1b[0m\x1b[36m║\x1b[0m\r\n")
+            add("\x1b[36m║\x1b[0m\x1b[2m" + line + " " * max(0, pad)
+                + "\x1b[0m\x1b[36m║\x1b[0m")
 
-        out.append("\x1b[36m╠" + "═" * (cols - 2) + "╣\x1b[0m\r\n")
+        add("\x1b[36m╠" + "═" * (cols - 2) + "╣\x1b[0m")
 
-        # instructions line
         instr = "  Enter=queue  Esc / Ctrl+Q=cancel  Backspace=delete"
-        out.append("\x1b[36m║\x1b[0m" + instr + " " * max(0, cols - 2 - len(instr)) + "\x1b[36m║\x1b[0m\r\n")
+        add("\x1b[36m║\x1b[0m" + instr + " " * max(0, cols - 2 - len(instr))
+            + "\x1b[36m║\x1b[0m")
         if note:
             hint = "  " + note
-            out.append("\x1b[36m║\x1b[0m\x1b[33m" + hint + "\x1b[0m"
-                       + " " * max(0, cols - 2 - len(hint)) + "\x1b[36m║\x1b[0m\r\n")
+            add("\x1b[36m║\x1b[0m\x1b[33m" + hint + "\x1b[0m"
+                + " " * max(0, cols - 2 - len(hint)) + "\x1b[36m║\x1b[0m")
 
-        out.append("\x1b[36m║" + " " * (cols - 2) + "║\x1b[0m\r\n")
+        # empty spacer row ABOVE the input line
+        add("\x1b[36m║" + " " * (cols - 2) + "║\x1b[0m")
 
-        # input line
+        # === INPUT LINE — remember its row so we can park cursor here ===
+        input_row = row + 1  # ANSI rows are 1-based
         buf = "".join(self._queue_buf)
-        prompt = "  \x1b[1;35m>\x1b[0m "
-        buf_display = buf if len(buf) < cols - 8 else buf[-(cols - 8):]
-        visible_prompt_len = 4  # "  > "
-        line_text = prompt + buf_display
-        pad = cols - 2 - (visible_prompt_len + len(buf_display))
-        out.append("\x1b[36m║\x1b[0m" + line_text + " " * max(0, pad) + "\x1b[36m║\x1b[0m\r\n")
-        out.append("\x1b[36m║" + " " * (cols - 2) + "║\x1b[0m\r\n")
-        out.append("\x1b[36m╚" + "═" * (cols - 2) + "╝\x1b[0m\r\n")
+        prompt_visible = "  > "          # 4 cols: "  ", ">", " "
+        # keep the right side of buf visible if it overflows
+        max_buf_visible = cols - 2 - len(prompt_visible) - 1
+        buf_display = buf if len(buf) <= max_buf_visible else buf[-max_buf_visible:]
+        line_text = (
+            "\x1b[36m║\x1b[0m"                      # left border (no width)
+            + "  "                                   # 2-col indent
+            + "\x1b[1;35m>\x1b[0m "                  # coloured prompt + space
+            + buf_display
+        )
+        visible_len = 2 + 2 + len(buf_display)       # "  " + "> " + buf
+        pad = cols - 2 - visible_len
+        add(line_text + " " * max(0, pad) + "\x1b[36m║\x1b[0m")
+
+        # cursor column: after "║" (col 1) + "  " (2 cols) + "> " (2 cols) + buf
+        cursor_col = 1 + 2 + 2 + len(buf_display) + 1  # +1 because 1-based
+
+        add("\x1b[36m║" + " " * (cols - 2) + "║\x1b[0m")
+        add("\x1b[36m╚" + "═" * (cols - 2) + "╝\x1b[0m")
+
+        # park cursor at input line, then show it again
+        out.append(f"\x1b[{input_row};{cursor_col}H")
+        out.append("\x1b[?25h")
 
         payload = "".join(out).encode("utf-8", errors="replace")
         try:

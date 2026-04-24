@@ -268,5 +268,5 @@ MIT — see [`LICENSE`](./LICENSE).
   Andrés Felipe Zapata Mesa et al.
 * Inspired by discussions in
   [anthropics/claude-code#50246](https://github.com/anthropics/claude-code/issues/50246).
-* Authored by [Sung](mailto:u10912029@ms.ttu.edu.tw) with pair-programming
-  assistance from Claude.
+* Authored by Sung with pair-programming assistance from Claude. For
+  contact, please open an [issue](../../issues) on this repository.

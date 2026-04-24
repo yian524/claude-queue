@@ -70,4 +70,6 @@ cleanest design.
 ## Security
 
 If you find a vulnerability, please **don't** file a public issue.
-Email the maintainer directly (see `README.md` credits section).
+Use GitHub's private vulnerability reporting feature on this repository
+(Security tab → Report a vulnerability), or open a minimal public issue
+asking for a private channel.
