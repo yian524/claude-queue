@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-04-24
+
+### Fixed
+- **"Two input boxes" ghost on alt-screen exit.** Root cause: during
+  queue mode, Claude's Ink TUI continued emitting full-screen redraw
+  frames (status bar, spinner) which we buffered. On resume, replaying
+  every buffered frame left residue from earlier frames that later ones
+  didn't fully overwrite. Fixed by:
+  - Clearing the visible screen (`\x1b[H\x1b[2J`) before the replay so
+    the final frame draws on a clean slate.
+  - Truncating the replay buffer to the last 16 KB — a single Ink frame
+    is typically < 8 KB, so we reliably keep at least one complete
+    frame and drop older ones that would have been overdrawn anyway.
+
 ## [0.3.3] - 2026-04-24
 
 ### Fixed

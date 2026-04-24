@@ -174,10 +174,23 @@ def cmd_start(args: argparse.Namespace) -> int:
     def _resume_output() -> None:
         with pause_lock:
             paused_flag["v"] = False
-            # flush everything Claude wrote while we were paused
             if paused_buf and stdout_buffer is not None:
                 try:
-                    stdout_buffer.write(b"".join(paused_buf))
+                    # Each buffered chunk is a full-screen redraw frame from
+                    # Claude's Ink TUI. Replaying them all naively leaves
+                    # residue from earlier frames because later frames may
+                    # not cover the same cells. Keep only the LAST ~16 KB
+                    # — that's virtually guaranteed to contain a complete
+                    # frame (Ink's frames are typically < 8 KB). Then
+                    # clear the visible screen before writing so the last
+                    # frame draws on a clean slate and no "double input
+                    # box" ghost remains.
+                    combined = b"".join(paused_buf)
+                    MAX_REPLAY_BYTES = 16 * 1024
+                    if len(combined) > MAX_REPLAY_BYTES:
+                        combined = combined[-MAX_REPLAY_BYTES:]
+                    stdout_buffer.write(b"\x1b[H\x1b[2J")  # home + clear visible
+                    stdout_buffer.write(combined)
                     stdout_buffer.flush()
                 except Exception:
                     pass
