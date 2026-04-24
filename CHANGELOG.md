@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-04-24
+
+### Added
+- **Queue-mode input is now fully editable.** Previously the left/right
+  arrow keys were ignored so the only way to fix a typo was to
+  backspace all the way from the end. Now in the alt-screen queue UI:
+  - `←` / `→` move the cursor one char within the buffer
+  - `Home` / `End` jump to start / end of buffer
+  - `Delete` removes the char AT the cursor
+  - `Backspace` removes the char BEFORE the cursor
+  - Typing inserts AT the cursor position (not always at end)
+  - CJK characters move the visual cursor 2 columns per step
+
+### Implementation
+- New `_cursor_pos` state on `TerminalRelay` tracks logical position in
+  `_queue_buf` (0..len). Reset to 0 on mode entry and on exit.
+- `_render_queue_ui` computes `cursor_col` from the visual width of
+  `buf_display[:cursor_visible_pos]` so the terminal cursor lands at
+  the correct column even mid-buffer.
+
 ## [0.4.0] - 2026-04-24
 
 ### Fixed

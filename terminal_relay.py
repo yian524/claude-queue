@@ -86,6 +86,9 @@ VK_UP = 0x26
 VK_DOWN = 0x28
 VK_LEFT = 0x25
 VK_RIGHT = 0x27
+VK_HOME = 0x24
+VK_END = 0x23
+VK_DELETE = 0x2E
 
 
 class TerminalRelay:
@@ -116,6 +119,10 @@ class TerminalRelay:
 
         self._mode = "direct"
         self._queue_buf: list[str] = []
+        # Cursor position WITHIN _queue_buf, measured in list indices
+        # (not visual columns). Range: 0..len(_queue_buf).
+        # len() == at end of buffer; 0 == at very start.
+        self._cursor_pos: int = 0
         self._input_row = 0  # terminal row where input cursor lives (set by render)
         self._input_col_base = 0
         # --- dropdown autocomplete state (queue mode) ---
@@ -257,14 +264,50 @@ class TerminalRelay:
         # ---- Backspace ----
         if k.vkey == VK_BACK:
             if self._mode == "queue":
-                if self._queue_buf:
-                    self._queue_buf.pop()
+                # Delete char BEFORE cursor (classic backspace)
+                if self._cursor_pos > 0:
+                    del self._queue_buf[self._cursor_pos - 1]
+                    self._cursor_pos -= 1
                     self._refresh_dropdown()
                     self._update_input_line()
             else:
                 self._debug("backspace sent")
-                self._send_to_pty(b"\x7f")  # DEL - most Ink TUIs accept this
+                self._send_to_pty(b"\x7f")
             return
+
+        # ---- Delete (delete char AT cursor) ----
+        if k.vkey == VK_DELETE:
+            if self._mode == "queue":
+                if self._cursor_pos < len(self._queue_buf):
+                    del self._queue_buf[self._cursor_pos]
+                    self._refresh_dropdown()
+                    self._update_input_line()
+            else:
+                self._send_to_pty(b"\x1b[3~")
+            return
+
+        # ---- Left / Right / Home / End inside queue input ----
+        if self._mode == "queue":
+            if k.vkey == VK_LEFT:
+                if self._cursor_pos > 0:
+                    self._cursor_pos -= 1
+                    self._update_input_line()
+                return
+            if k.vkey == VK_RIGHT:
+                if self._cursor_pos < len(self._queue_buf):
+                    self._cursor_pos += 1
+                    self._update_input_line()
+                return
+            if k.vkey == VK_HOME:
+                if self._cursor_pos != 0:
+                    self._cursor_pos = 0
+                    self._update_input_line()
+                return
+            if k.vkey == VK_END:
+                if self._cursor_pos != len(self._queue_buf):
+                    self._cursor_pos = len(self._queue_buf)
+                    self._update_input_line()
+                return
 
         # ---- Tab ----
         if k.vkey == VK_TAB:
@@ -275,7 +318,9 @@ class TerminalRelay:
         # ---- Plain character (includes Chinese via IME commit) ----
         if k.text:
             if self._mode == "queue":
-                self._queue_buf.append(k.text)
+                # Insert AT cursor position (not always at end)
+                self._queue_buf.insert(self._cursor_pos, k.text)
+                self._cursor_pos += 1
                 self._refresh_dropdown()
                 self._update_input_line()
             else:
@@ -316,6 +361,7 @@ class TerminalRelay:
     def _enter_queue_mode(self) -> None:
         self._mode = "queue"
         self._queue_buf = []
+        self._cursor_pos = 0
         self._dropdown_active = False
         self._dropdown_items = []
         self._dropdown_selected = 0
@@ -343,6 +389,7 @@ class TerminalRelay:
         """
         raw_text = "".join(self._queue_buf).strip() if push else ""
         self._queue_buf = []
+        self._cursor_pos = 0
         # Leave alt screen first — terminal restores Claude's UI as-was.
         try:
             sys.stdout.buffer.write(_ALT_EXIT)
@@ -404,6 +451,8 @@ class TerminalRelay:
     def _commit_queue_input(self) -> None:
         raw = "".join(self._queue_buf).strip()
         if not raw:
+            self._queue_buf = []
+            self._cursor_pos = 0
             self._render_queue_ui(
                 note="empty input; please type something or Esc to cancel"
             )
@@ -599,11 +648,14 @@ class TerminalRelay:
         prompt_visible = "  > "          # 4 cols: "  ", ">", " "
         # Keep the RIGHT side of buf visible if it overflows. Truncate by
         # visual width, not char count, so CJK characters (2 cols each) don't
-        # drive the wrap point wrong.
+        # drive the wrap point wrong. Track how many leading chars we dropped
+        # so we can adjust cursor_pos accordingly.
         max_buf_visible_cols = cols - 2 - len(prompt_visible) - 1
         buf_display = buf
+        dropped_from_left = 0
         while _visual_width(buf_display) > max_buf_visible_cols:
             buf_display = buf_display[1:]
+            dropped_from_left += 1
         buf_vw = _visual_width(buf_display)
         line_text = (
             "\x1b[36m║\x1b[0m"                      # left border (no width)
@@ -615,9 +667,12 @@ class TerminalRelay:
         pad = cols - 2 - visible_len
         add(line_text + " " * max(0, pad) + "\x1b[36m║\x1b[0m")
 
-        # cursor column: after "║" (col 1) + "  " (2 cols) + "> " (2 cols)
-        # + buf's VISUAL width (CJK = 2 cols each)
-        cursor_col = 1 + 2 + 2 + buf_vw + 1  # +1 because 1-based
+        # cursor column: "║" (col 1) + "  " (2 cols) + "> " (2 cols)
+        # + visual width of buf chars BEFORE cursor_pos (not the whole buf,
+        # so the cursor lands mid-text when user moves it).
+        cursor_visible_pos = max(0, self._cursor_pos - dropped_from_left)
+        chars_before_cursor = buf_display[:cursor_visible_pos]
+        cursor_col = 1 + 2 + 2 + _visual_width(chars_before_cursor) + 1
 
         add("\x1b[36m║" + " " * (cols - 2) + "║\x1b[0m")
         add("\x1b[36m╚" + "═" * (cols - 2) + "╝\x1b[0m")
