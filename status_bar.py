@@ -109,6 +109,12 @@ class StatusBar:
             parts.append("busy")
         if p.get("drift_detected"):
             parts.append("⚠drift")
+        # If dispatch has been held for more than 30 s despite having a
+        # ready entry, surface a loud warning. Most common cause: Claude
+        # is in an "Esc again to clear" state and needs user attention.
+        stuck_s = p.get("stuck_seconds", 0)
+        if stuck_s and stuck_s > 30 and p.get("ready_len", 0) > 0:
+            parts.append(f"⚠STUCK {int(stuck_s)}s press Esc in Claude")
         return " │ ".join(parts)
 
 

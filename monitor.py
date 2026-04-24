@@ -101,6 +101,9 @@ class Monitor:
         self._logger.info("monitor stopping")
 
     def snapshot(self) -> dict:
+        # seconds we've been holding dispatch; 0 if not stuck
+        stuck_since = getattr(self, "_dispatch_stuck_since", 0)
+        stuck_s = (time.monotonic() - stuck_since) if stuck_since else 0
         return {
             "idle": self.state.idle,
             "queue_len": self.state.queue_len,
@@ -109,6 +112,7 @@ class Monitor:
             "last_reasons": self.state.last_reasons,
             "dispatched_total": self.state.dispatched_total,
             "last_dispatch_at": self.state.last_dispatch_at,
+            "stuck_seconds": round(stuck_s, 1),
             "mode": self.get_mode(),
             "error": self.state.error,
         }
@@ -176,6 +180,16 @@ class Monitor:
 
         # don't dispatch during startup grace, during queue mode, or within
         # post_dispatch_backoff of the last send
+        # Track how long we've been stuck holding dispatch so we can
+        # surface a user-visible warning (title bar) if Claude is in an
+        # unusual state (e.g. "Esc again to clear") and the queue is
+        # frozen. See _dispatch_stuck_since.
+        if self.state.ready_len > 0 and not result.idle:
+            if getattr(self, "_dispatch_stuck_since", 0) == 0:
+                self._dispatch_stuck_since = now
+        else:
+            self._dispatch_stuck_since = 0
+
         # Log blocking reasons ONLY when we have ready entries; this is
         # the signal for "why didn't my /wait fire?".
         if self.state.ready_len > 0 and not result.idle:
