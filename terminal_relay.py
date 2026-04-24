@@ -726,14 +726,15 @@ class TerminalRelay:
         if not self._dropdown_items:
             return
         item = self._dropdown_items[self._dropdown_selected]
-        # Replace buffer with just "/cmdname " (trailing space) so user
-        # can immediately start typing args. For argument-less commands
-        # (/cancel, /help) we keep exactly the command and let Enter
-        # fire the action.
         name = item["name"]
         has_args = "<" in item["template"]
         new_buf = name + (" " if has_args else "")
         self._queue_buf = list(new_buf)
+        # Park cursor at the END of the inserted template so the user
+        # can start typing args immediately (previous bug: cursor stayed
+        # at wherever the `/` was when dropdown opened, e.g. pos 1, so
+        # the display looked like `> /│at ` instead of `> /at │`).
+        self._cursor_pos = len(self._queue_buf)
         self._dropdown_active = False
         self._dropdown_items = []
         self._update_input_line()
