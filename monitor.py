@@ -173,6 +173,24 @@ class Monitor:
                     f"reasons={result.reasons} drift={result.drift_detected}"
                 )
                 self._last_block_log = now
+                # If we've been blocked for over 10s, dump the actual tail
+                # so we can diagnose what the detector is seeing. Dumped
+                # once per 30-second window to avoid log bloat.
+                if result.drift_detected:
+                    last_dump = getattr(self, "_last_tail_dump", 0)
+                    if now - last_dump > 30.0:
+                        import idle_detector as _ide
+                        clean = _ide._strip_ansi(tail)
+                        lines = [l for l in clean.splitlines() if l.strip()]
+                        last5 = lines[-5:]
+                        self._logger.info(
+                            "tail dump (last 5 non-empty stripped lines):"
+                        )
+                        for ln in last5:
+                            # truncate very long lines
+                            disp = ln if len(ln) <= 120 else ln[:117] + "..."
+                            self._logger.info(f"  | {disp!r}")
+                        self._last_tail_dump = now
 
         if now - self._started_at < self.startup_grace_s:
             return
