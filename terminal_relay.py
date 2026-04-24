@@ -62,6 +62,10 @@ VK_BACK = 0x08
 VK_TAB = 0x09
 VK_Q = 0x51
 VK_C = 0x43
+VK_UP = 0x26
+VK_DOWN = 0x28
+VK_LEFT = 0x25
+VK_RIGHT = 0x27
 
 
 class TerminalRelay:
@@ -94,6 +98,10 @@ class TerminalRelay:
         self._queue_buf: list[str] = []
         self._input_row = 0  # terminal row where input cursor lives (set by render)
         self._input_col_base = 0
+        # --- dropdown autocomplete state (queue mode) ---
+        self._dropdown_active: bool = False
+        self._dropdown_items: list[dict] = []
+        self._dropdown_selected: int = 0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -133,6 +141,39 @@ class TerminalRelay:
 
     def _handle_key(self, k) -> None:
         """Process one decoded Key event."""
+        # ---- Dropdown navigation (queue mode, dropdown open) ----
+        # Arrow keys + Tab + Enter are intercepted BEFORE normal handling so
+        # the dropdown takes priority.
+        if self._mode == "queue" and self._dropdown_active:
+            if k.vkey == VK_UP:
+                if self._dropdown_items:
+                    self._dropdown_selected = (
+                        (self._dropdown_selected - 1) % len(self._dropdown_items)
+                    )
+                    self._update_input_line()
+                return
+            if k.vkey == VK_DOWN:
+                if self._dropdown_items:
+                    self._dropdown_selected = (
+                        (self._dropdown_selected + 1) % len(self._dropdown_items)
+                    )
+                    self._update_input_line()
+                return
+            if k.vkey == VK_TAB:
+                self._apply_dropdown_selection()
+                return
+            # Enter with dropdown open: also apply selection (confirms template
+            # rather than pushing a raw '/wait' message)
+            if k.vkey == VK_RETURN:
+                self._apply_dropdown_selection()
+                return
+            # Esc while dropdown open: close dropdown, stay in queue mode
+            if k.vkey == VK_ESCAPE:
+                self._dropdown_active = False
+                self._dropdown_items = []
+                self._update_input_line()
+                return
+
         # ---- Ctrl+Q: mode toggle ----
         if k.ctrl and k.vkey == self.toggle_vk:
             self._toggle_mode()
@@ -198,6 +239,7 @@ class TerminalRelay:
             if self._mode == "queue":
                 if self._queue_buf:
                     self._queue_buf.pop()
+                    self._refresh_dropdown()
                     self._update_input_line()
             else:
                 self._debug("backspace sent")
@@ -214,6 +256,7 @@ class TerminalRelay:
         if k.text:
             if self._mode == "queue":
                 self._queue_buf.append(k.text)
+                self._refresh_dropdown()
                 self._update_input_line()
             else:
                 self._debug(f"char sent={k.text!r} vk=0x{k.vkey:02X}")
@@ -253,6 +296,9 @@ class TerminalRelay:
     def _enter_queue_mode(self) -> None:
         self._mode = "queue"
         self._queue_buf = []
+        self._dropdown_active = False
+        self._dropdown_items = []
+        self._dropdown_selected = 0
         # pause Claude->stdout passthrough BEFORE we switch screens so in-
         # flight ANSI doesn't land on our alt screen
         if self.on_mode_change:
@@ -438,6 +484,28 @@ class TerminalRelay:
             add("\x1b[36m║\x1b[0m\x1b[33m" + hint + "\x1b[0m"
                 + " " * max(0, cols - 2 - len(hint)) + "\x1b[36m║\x1b[0m")
 
+        # Dropdown autocomplete (when user is typing a /command name)
+        if self._dropdown_active and self._dropdown_items:
+            add("\x1b[36m║" + " " * (cols - 2) + "║\x1b[0m")
+            hdr = "  \x1b[1;36mCommands\x1b[0m  (↑↓ select, Tab/Enter pick, Esc close)"
+            # account for ANSI codes in length calc
+            visible = "  Commands  (↑↓ select, Tab/Enter pick, Esc close)"
+            pad = cols - 2 - len(visible)
+            add("\x1b[36m║\x1b[0m" + hdr + " " * max(0, pad) + "\x1b[36m║\x1b[0m")
+            for i, item in enumerate(self._dropdown_items):
+                is_sel = (i == self._dropdown_selected)
+                marker = "►" if is_sel else " "
+                label = f"    {marker} {item['template']:<44}  {item['summary']}"
+                if len(label) > cols - 4:
+                    label = label[: cols - 7] + "..."
+                pad = cols - 2 - len(label)
+                if is_sel:
+                    add("\x1b[36m║\x1b[0m\x1b[1;43;30m" + label
+                        + " " * max(0, pad) + "\x1b[0m\x1b[36m║\x1b[0m")
+                else:
+                    add("\x1b[36m║\x1b[0m" + label
+                        + " " * max(0, pad) + "\x1b[36m║\x1b[0m")
+
         # empty spacer row ABOVE the input line
         add("\x1b[36m║" + " " * (cols - 2) + "║\x1b[0m")
 
@@ -483,6 +551,47 @@ class TerminalRelay:
         draw — no interference with Claude's main screen.
         """
         self._render_queue_ui()
+
+    # ------------------------- dropdown autocomplete -------------------------
+
+    def _refresh_dropdown(self) -> None:
+        """Recompute dropdown visibility from current buffer contents.
+
+        Rules:
+          - Only active when the first char is '/' and the buffer contains
+            no space yet (i.e., user is still typing the command name).
+          - Filter COMMANDS by prefix match.
+          - Keep selection index in bounds.
+        """
+        buf = "".join(self._queue_buf)
+        if buf.startswith("/") and " " not in buf:
+            self._dropdown_items = _slash.filter_commands(buf)
+            self._dropdown_active = bool(self._dropdown_items)
+            if self._dropdown_selected >= max(1, len(self._dropdown_items)):
+                self._dropdown_selected = 0
+        else:
+            self._dropdown_active = False
+            self._dropdown_items = []
+            self._dropdown_selected = 0
+
+    def _apply_dropdown_selection(self) -> None:
+        """Replace buffer with the currently selected command template,
+        close the dropdown, and keep the user in queue mode to type args.
+        """
+        if not self._dropdown_items:
+            return
+        item = self._dropdown_items[self._dropdown_selected]
+        # Replace buffer with just "/cmdname " (trailing space) so user
+        # can immediately start typing args. For argument-less commands
+        # (/cancel, /help) we keep exactly the command and let Enter
+        # fire the action.
+        name = item["name"]
+        has_args = "<" in item["template"]
+        new_buf = name + (" " if has_args else "")
+        self._queue_buf = list(new_buf)
+        self._dropdown_active = False
+        self._dropdown_items = []
+        self._update_input_line()
 
     # ------------------------- PTY write wrapper -------------------------
 
