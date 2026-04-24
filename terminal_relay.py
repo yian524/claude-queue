@@ -24,6 +24,7 @@ Toggle
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import threading
 import time
@@ -31,6 +32,14 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import queue_store
+
+# ANSI alt-screen sequences
+# - ?1049h: switch to alt screen + save cursor
+# - ?25h:   show cursor
+# - H + 2J: home + clear screen
+# - ?1049l: exit alt screen + restore cursor
+_ALT_ENTER = b"\x1b[?1049h\x1b[?25h\x1b[H\x1b[2J"
+_ALT_EXIT = b"\x1b[?1049l"
 
 # debug log: set CLAUDE_Q_DEBUG=1 to write every keystroke to a file
 _DEBUG = os.environ.get("CLAUDE_Q_DEBUG", "") == "1"
@@ -71,14 +80,18 @@ class TerminalRelay:
         pty_write: Callable[[bytes], int],
         toggle_vk: int = VK_Q,
         on_mode_change: Optional[Callable[[str], None]] = None,
+        session_id: str = "",
     ):
         self.queue_path = queue_path
         self.pty_write = pty_write
         self.toggle_vk = toggle_vk
         self.on_mode_change = on_mode_change
+        self.session_id = session_id
 
         self._mode = "direct"
         self._queue_buf: list[str] = []
+        self._input_row = 0  # terminal row where input cursor lives (set by render)
+        self._input_col_base = 0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -164,8 +177,7 @@ class TerminalRelay:
             if self._mode == "queue":
                 if self._queue_buf:
                     self._queue_buf.pop()
-                    sys.stdout.write("\b \b")
-                    sys.stdout.flush()
+                    self._update_input_line()
             else:
                 self._debug("backspace sent")
                 self._send_to_pty(b"\x7f")  # DEL - most Ink TUIs accept this
@@ -181,8 +193,7 @@ class TerminalRelay:
         if k.text:
             if self._mode == "queue":
                 self._queue_buf.append(k.text)
-                sys.stdout.write(k.text)
-                sys.stdout.flush()
+                self._update_input_line()
             else:
                 self._debug(f"char sent={k.text!r} vk=0x{k.vkey:02X}")
                 self._send_to_pty(k.text.encode("utf-8", errors="replace"))
@@ -201,62 +212,168 @@ class TerminalRelay:
                     f"alt={k.alt} text={k.text!r}")
 
     # ------------------------- mode logic -------------------------
+    #
+    # UX v2 (alt-screen based):
+    #   * Entering queue mode switches the terminal to its alternate screen
+    #     buffer (\x1b[?1049h), just like vim / less / tmux / htop do.
+    #   * We draw a clean, full-screen queue UI there; Claude's main-screen
+    #     TUI cannot redraw over us because the terminal shows only alt.
+    #   * On exit (Enter / Esc / Ctrl+Q again), \x1b[?1049l tells the
+    #     terminal to drop the alt screen and restore the main screen as it
+    #     was — Claude's UI is perfectly preserved, no flush/redraw dance.
 
     def _toggle_mode(self) -> None:
         if self._mode == "direct":
-            self._mode = "queue"
-            self._queue_buf = []
-            sys.stdout.write("\r\n\x1b[33m[claude-q] queue mode. type message + Enter "
-                             "to queue, Esc to cancel, Ctrl+Q to toggle back.\x1b[0m\r\n"
-                             "\x1b[35m[queue]>\x1b[0m ")
-            sys.stdout.flush()
+            self._enter_queue_mode()
         else:
-            self._cancel_queue_input(silent=True)
-            self._mode = "direct"
-            sys.stdout.write("\r\n\x1b[32m[claude-q] back to direct mode.\x1b[0m\r\n")
-            sys.stdout.flush()
+            # second Ctrl+Q acts like Esc-cancel
+            self._exit_queue_mode(push=False)
+
+    def _enter_queue_mode(self) -> None:
+        self._mode = "queue"
+        self._queue_buf = []
+        # pause Claude->stdout passthrough BEFORE we switch screens so in-
+        # flight ANSI doesn't land on our alt screen
         if self.on_mode_change:
             try:
-                self.on_mode_change(self._mode)
+                self.on_mode_change("queue")
+            except Exception:
+                pass
+        try:
+            sys.stdout.buffer.write(_ALT_ENTER)
+            sys.stdout.buffer.flush()
+        except Exception:
+            pass
+        self._render_queue_ui()
+
+    def _exit_queue_mode(self, push: bool) -> None:
+        text = "".join(self._queue_buf).strip() if push else ""
+        self._queue_buf = []
+        # Leave alt screen first — terminal restores Claude's UI as-was.
+        try:
+            sys.stdout.buffer.write(_ALT_EXIT)
+            sys.stdout.buffer.flush()
+        except Exception:
+            pass
+        self._mode = "direct"
+
+        # Now print a short inline confirmation on the main screen.
+        if push and text:
+            try:
+                eid = queue_store.push(self.queue_path, text, source="queue-pane")
+                sys.stdout.write(
+                    f"\r\n\x1b[32m[claude-q] queued id={eid[:15]} "
+                    f"preview={text[:60]!r}\x1b[0m\r\n"
+                )
+                sys.stdout.flush()
+            except Exception as e:
+                sys.stdout.write(f"\r\n\x1b[31m[claude-q] push failed: {e}\x1b[0m\r\n")
+                sys.stdout.flush()
+        # resume Claude->stdout passthrough AFTER alt screen exit so
+        # buffered bytes reach the restored main screen cleanly.
+        if self.on_mode_change:
+            try:
+                self.on_mode_change("direct")
             except Exception:
                 pass
 
     def _commit_queue_input(self) -> None:
         text = "".join(self._queue_buf).strip()
-        self._queue_buf = []
         if not text:
-            sys.stdout.write("\r\n\x1b[33m[claude-q] empty input; staying in queue mode.\x1b[0m\r\n"
-                             "\x1b[35m[queue]>\x1b[0m ")
-            sys.stdout.flush()
+            # empty input: stay in queue mode, redraw so user sees input area
+            self._render_queue_ui(note="empty input; please type something or Esc to cancel")
             return
-        try:
-            eid = queue_store.push(self.queue_path, text, source="queue-pane")
-        except Exception as e:
-            sys.stdout.write(f"\r\n\x1b[31m[claude-q] push failed: {e}\x1b[0m\r\n")
-            sys.stdout.flush()
-            return
-        sys.stdout.write(f"\r\n\x1b[32m[claude-q] queued id={eid[:15]} "
-                         f"preview={text[:60]!r}\x1b[0m\r\n")
-        sys.stdout.write("\x1b[32m[claude-q] back to direct mode.\x1b[0m\r\n")
-        sys.stdout.flush()
-        self._mode = "direct"
-        if self.on_mode_change:
-            try:
-                self.on_mode_change(self._mode)
-            except Exception:
-                pass
+        self._exit_queue_mode(push=True)
 
     def _cancel_queue_input(self, silent: bool = False) -> None:
-        self._queue_buf = []
-        if not silent:
-            sys.stdout.write("\r\n\x1b[33m[claude-q] queue input cancelled.\x1b[0m\r\n")
-            sys.stdout.flush()
-        self._mode = "direct"
-        if self.on_mode_change:
-            try:
-                self.on_mode_change(self._mode)
-            except Exception:
-                pass
+        self._exit_queue_mode(push=False)
+
+    # ------------------------- UI rendering -------------------------
+
+    def _render_queue_ui(self, note: str = "") -> None:
+        """Draw the full queue UI on the alt screen.
+
+        Uses box-drawing characters for a clear visual boundary. After this
+        runs the cursor is positioned at the end of the input line so
+        subsequent keystrokes can just append there.
+        """
+        try:
+            cols = max(60, shutil.get_terminal_size((80, 24)).columns)
+        except Exception:
+            cols = 80
+
+        pending = [
+            e for e in queue_store.list_all(self.queue_path)
+            if e.status == queue_store.STATUS_PENDING
+        ]
+
+        sid = (self.session_id or "(no-session)")[:30]
+        out: list[str] = []
+        out.append("\x1b[H\x1b[2J")  # home + clear
+        # top banner
+        out.append("\x1b[1;33m")
+        out.append("╔" + "═" * (cols - 2) + "╗\r\n")
+        title = "  [claude-q]  QUEUE INPUT"
+        right = f"session: {sid}  "
+        gap = cols - 2 - len(title) - len(right)
+        out.append("║" + title + " " * max(0, gap) + right + "║\r\n")
+        out.append("╠" + "═" * (cols - 2) + "╣\r\n")
+        out.append("\x1b[0m")
+
+        # pending list
+        out.append(f"\x1b[36m║  Pending ({len(pending)}):\x1b[0m")
+        out.append(" " * (cols - 2 - len(f"  Pending ({len(pending)}):")) + "\x1b[36m║\x1b[0m\r\n")
+        shown = pending[-8:]
+        for i, e in enumerate(shown, start=max(1, len(pending) - 7)):
+            preview = e.text.replace("\n", " ")
+            if len(preview) > cols - 12:
+                preview = preview[:cols - 15] + "..."
+            line = f"    {i:>2}. {preview}"
+            pad = cols - 2 - len(line)
+            out.append("\x1b[36m║\x1b[0m" + line + " " * max(0, pad) + "\x1b[36m║\x1b[0m\r\n")
+        if not pending:
+            line = "    (empty)"
+            pad = cols - 2 - len(line)
+            out.append("\x1b[36m║\x1b[0m\x1b[2m" + line + " " * max(0, pad) + "\x1b[0m\x1b[36m║\x1b[0m\r\n")
+
+        out.append("\x1b[36m╠" + "═" * (cols - 2) + "╣\x1b[0m\r\n")
+
+        # instructions line
+        instr = "  Enter=queue  Esc / Ctrl+Q=cancel  Backspace=delete"
+        out.append("\x1b[36m║\x1b[0m" + instr + " " * max(0, cols - 2 - len(instr)) + "\x1b[36m║\x1b[0m\r\n")
+        if note:
+            hint = "  " + note
+            out.append("\x1b[36m║\x1b[0m\x1b[33m" + hint + "\x1b[0m"
+                       + " " * max(0, cols - 2 - len(hint)) + "\x1b[36m║\x1b[0m\r\n")
+
+        out.append("\x1b[36m║" + " " * (cols - 2) + "║\x1b[0m\r\n")
+
+        # input line
+        buf = "".join(self._queue_buf)
+        prompt = "  \x1b[1;35m>\x1b[0m "
+        buf_display = buf if len(buf) < cols - 8 else buf[-(cols - 8):]
+        visible_prompt_len = 4  # "  > "
+        line_text = prompt + buf_display
+        pad = cols - 2 - (visible_prompt_len + len(buf_display))
+        out.append("\x1b[36m║\x1b[0m" + line_text + " " * max(0, pad) + "\x1b[36m║\x1b[0m\r\n")
+        out.append("\x1b[36m║" + " " * (cols - 2) + "║\x1b[0m\r\n")
+        out.append("\x1b[36m╚" + "═" * (cols - 2) + "╝\x1b[0m\r\n")
+
+        payload = "".join(out).encode("utf-8", errors="replace")
+        try:
+            sys.stdout.buffer.write(payload)
+            sys.stdout.buffer.flush()
+        except Exception:
+            pass
+
+    def _update_input_line(self) -> None:
+        """Fast-path redraw: just re-render the whole UI (no cursor math).
+
+        Called on every char / backspace in queue mode. Full re-render is
+        cheap in alt screen because the terminal has only this small UI to
+        draw — no interference with Claude's main screen.
+        """
+        self._render_queue_ui()
 
     # ------------------------- PTY write wrapper -------------------------
 

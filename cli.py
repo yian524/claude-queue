@@ -177,8 +177,10 @@ def cmd_start(args: argparse.Namespace) -> int:
     )
     session.write_session(st)
 
-    # relay (keyboard -> PTY or queue) — pause Claude passthrough when
-    # user enters queue mode so our prompt isn't stomped by TUI redraws.
+    # relay (keyboard -> PTY or queue). When the relay switches to queue
+    # mode it owns the terminal via an ANSI alt-screen buffer, so we pause
+    # Claude -> stdout writes. On exit we resume, and the terminal's native
+    # alt-screen exit (\x1b[?1049l) restores Claude's view unchanged.
     def _on_mode_change(new_mode: str) -> None:
         if new_mode == "queue":
             _pause_output()
@@ -189,6 +191,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         queue_path=run_dir / "queue.jsonl",
         pty_write=lambda b: host.write(b),
         on_mode_change=_on_mode_change,
+        session_id=sid,
     )
     relay.start()
 
