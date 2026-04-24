@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-04-24
+
+### Added
+- Queue-mode UI now shows a **dispatch hint line** explaining why the
+  head entry is (or isn't) dispatching:
+  - `Next: 'xyz...' fires in 3m 12s` for scheduled entries
+  - `Next: ASAP — Claude is idle, dispatching soon`
+  - `Waiting: Claude's input has draft text (submit or clear it)` when
+    the real blocker is user-typed draft
+  - `Waiting: Claude is busy` when mid-response
+
+### Fixed
+- `claude -q doctor` failed with `module 'idle_detector' has no
+  attribute 'PROMPT_RE'` because v0.3.3 split the regex into
+  `PROMPT_RE_END` + `PROMPT_RE_LINE` but doctor wasn't updated. Now
+  probes both.
+
 ## [0.3.5] - 2026-04-24
 
 ### Changed

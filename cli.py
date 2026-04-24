@@ -644,8 +644,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # 7. idle detector regex sanity
     try:
         import idle_detector
-        fake = "│ >                                │"
-        assert idle_detector.PROMPT_RE.search(fake)
+        boxed = "│ >                                │"
+        angle = "❯"
+        assert (idle_detector.PROMPT_RE_END.search(boxed)
+                or idle_detector.PROMPT_RE_END.search(angle))
+        assert idle_detector.PROMPT_RE_LINE.search("  ❯  ")
         print("  prompt regex:      OK")
     except Exception as e:
         print(f"  prompt regex:      FAIL ({e})")

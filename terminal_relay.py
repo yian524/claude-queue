@@ -469,6 +469,12 @@ class TerminalRelay:
         # (priority desc, dispatch_at asc, ts asc).
         pending.sort(key=queue_store._rank)
 
+        # Read the monitor's most recent snapshot so we can explain to the
+        # user WHY a pending-ASAP entry isn't dispatching (common source of
+        # confusion: Claude has draft text in its input -> prompt_visible=
+        # False -> monitor holds dispatch).
+        dispatch_hint = self._dispatch_hint(pending)
+
         sid = (self.session_id or "(no-session)")[:30]
         out: list[str] = []
         row = 0
@@ -533,6 +539,10 @@ class TerminalRelay:
         instr = "  Enter=queue  Esc / Ctrl+Q=cancel  Backspace=delete"
         add("\x1b[36m║\x1b[0m" + instr + " " * max(0, cols - 2 - len(instr))
             + "\x1b[36m║\x1b[0m")
+        if dispatch_hint:
+            hint = "  " + dispatch_hint
+            add("\x1b[36m║\x1b[0m\x1b[2m" + hint + "\x1b[0m"
+                + " " * max(0, cols - 2 - len(hint)) + "\x1b[36m║\x1b[0m")
         if note:
             hint = "  " + note
             add("\x1b[36m║\x1b[0m\x1b[33m" + hint + "\x1b[0m"
@@ -655,6 +665,49 @@ class TerminalRelay:
         except Exception as e:
             sys.stdout.write(f"\r\n\x1b[31m[claude-q] pty write error: {e}\x1b[0m\r\n")
             sys.stdout.flush()
+
+    def _dispatch_hint(self, pending: list) -> str:
+        """Build a one-line hint for the queue UI explaining why (or when)
+        the next entry will dispatch. Read from the monitor's status.json
+        snapshot so we can surface the real reason to the user.
+        """
+        if not pending:
+            return ""
+
+        # next entry in dispatch order (pending is already sorted by caller)
+        head = pending[0]
+
+        # If head is scheduled for the future, show the countdown.
+        if head.dispatch_at is not None:
+            delta = _scheduler.humanize_delta(head.dispatch_at)
+            if delta.startswith("in "):
+                return f"Next: {head.text[:30]!r} fires {delta}"
+            if delta.startswith("overdue "):
+                return (f"Next: {head.text[:30]!r} is overdue — waiting "
+                        f"for Claude idle")
+
+        # ASAP entry: show the real blocker from monitor's last tick
+        try:
+            status_path = self.queue_path.parent / "status.json"
+            if status_path.exists():
+                import json as _json
+                data = _json.loads(status_path.read_text(encoding="utf-8"))
+                reasons = data.get("last_reasons") or {}
+                if data.get("idle"):
+                    return "Next: ASAP — Claude is idle, dispatching soon"
+                blockers = []
+                if reasons.get("prompt_visible") is False:
+                    blockers.append("Claude's input has draft text "
+                                    "(submit or clear it)")
+                if reasons.get("not_busy") is False:
+                    blockers.append("Claude is busy")
+                if reasons.get("stable") is False:
+                    blockers.append("Claude output still changing")
+                if blockers:
+                    return "Waiting: " + "; ".join(blockers)
+        except Exception:
+            pass
+        return "Next: ASAP (waiting for Claude to reach empty prompt)"
 
     @staticmethod
     def _set_title(text: str) -> None:
