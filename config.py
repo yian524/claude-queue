@@ -23,14 +23,19 @@ except ImportError:  # pragma: no cover
 @dataclass(frozen=True)
 class Config:
     # --- idle detection knobs ---
-    debounce_s: float = 0.6          # pane must be stable this long to count as idle
-    poll_interval_s: float = 0.3     # monitor wake frequency
+    # NOTE: these defaults must stay in sync with `Monitor.__init__` defaults
+    # in `monitor.py`. v0.4.16 bug postmortem: when these drifted apart,
+    # `cli.py:231` passed slow values from here while pytest stayed green
+    # because it constructed Monitor directly. Result: 9 patch versions
+    # of "timing tuning" never reached production. Pinned by
+    # `tests/test_e2e_smoke.py::test_v0_4_8_defaults_pinned` going forward.
+    debounce_s: float = 0.25         # pane must be stable this long to count as idle
+    poll_interval_s: float = 0.1     # monitor wake frequency
     # Tail capacity: Claude's Ink TUI emits a LOT of ANSI per frame (cursor
-    # positioning, status line refreshes, box-drawing redraws). 4 KB of
-    # raw bytes is often < 40 rendered lines after ANSI stripping, which
-    # can let the prompt line scroll out of our window on long answers.
-    # 16 KB keeps the prompt reliably in view.
-    tail_chars: int = 16000
+    # positioning, status line refreshes, box-drawing redraws). The prompt
+    # glyph routinely lands at line -15 to -25 after status-bar churn, so
+    # 40 KB keeps it reliably in PROMPT_RE's scan window.
+    tail_chars: int = 40000
     prompt_no_match_warn_s: float = 30.0  # degrade warning threshold
 
     # --- terminal relay knobs ---
@@ -39,11 +44,13 @@ class Config:
     status_bar_refresh_s: float = 0.25
 
     # --- dispatch safety ---
-    dispatch_commit_delay_s: float = 0.05  # re-verify idle right before send
+    dispatch_commit_delay_s: float = 0.03  # re-verify idle right before send
     # Minimum gap between two consecutive dispatches. Combined with
-    # `saw_busy_since_dispatch` latch, this is the defense-in-depth against
-    # "dispatch two queue items so fast Claude concatenates them".
-    post_dispatch_backoff_s: float = 3.0
+    # `saw_busy_since_dispatch` latch (added v0.4.x in monitor.py), this
+    # is the defense-in-depth against "dispatch two queue items so fast
+    # Claude concatenates them". v0.1's 3.0s value was the only line of
+    # defense; v0.4+ has the latch, so 0.5s is plenty.
+    post_dispatch_backoff_s: float = 0.5
 
     # --- pty knobs ---
     pty_read_chunk: int = 4096

@@ -43,22 +43,74 @@ PROMPT_RE_LINE = re.compile(r"^\s*[❯›〉]\s*$")
 #
 # Claude Code v2.1+ uses whimsical action verbs (Honking, Moonwalking,
 # Percolating, Sautéing, Channelling, Actioning, Compacting, Thinking,
-# Computing, Working) with a spinner prefix (✻ ✢ ✽ ✺ * + ●) and an ellipsis
-# suffix (…). When the action FINISHES, the same line stays on screen but
-# uses past tense and drops the ellipsis, e.g. "✻ Sautéed for 52s".
+# Computing, Working, Manifesting, Cultivating, ...) with a spinner prefix
+# (✻ ✢ ✽ ✺ * + ●) and an ellipsis suffix (…). When the action FINISHES,
+# the same line stays on screen but uses past tense and drops the ellipsis,
+# e.g. "✻ Sautéed for 52s".
 #
-# So the reliable rule is: "spinner + ellipsis" = active, anything else
-# (including spinner without ellipsis, like "Sautéed for N s") = done.
+# Across versions the renderer has flip-flopped on the space between
+# spinner and verb:
+#   2.0.x:   "✻ Manifesting…"   (spinner + space + verb)
+#   2.1.121: "✻Manifesting…"    (spinner directly adjacent to verb)
+# So `\s*` (zero-or-more) — NOT `\s+` (one-or-more) — between spinner and
+# the trailing word.
 #
-# We also always treat "esc to interrupt" as busy — Claude only shows that
-# hint while genuinely mid-generation.
-BUSY_STATUS_RE = re.compile(r"^\s*[+*●·✻✢✽✺]\s+\S+…")
-BUSY_LITERALS = ("esc to interrupt",)
+# Reliable rule: "spinner + (optional space) + word + ellipsis" = active,
+# anything else (including spinner without ellipsis like "Sautéed for N s")
+# = done.
+# Spinner glyph set — the leading "I'm working" indicator that Claude
+# Code rotates through. Includes every glyph observed across 2.0.x and
+# 2.1.x. New glyphs land here as they're spotted in the wild.
+#   Plain ASCII:  + * ·
+#   Circles:      ●
+#   Asterisks:    ✻ U+273B  ✢ U+2722  ✽ U+273D  ✺ U+273A
+#                 ✱ U+2731 (added v0.4.13 — observed as "✱ Baking…")
+#                 ✶ U+2736 (added v0.4.13 — observed as "✶ Razzle-dazzling…")
+BUSY_STATUS_RE = re.compile(r"^\s*[+*●·✻✢✽✺✱✶]\s*\S+…")
 
-# How many trailing non-empty lines to inspect for busy markers.
-# Busy indicators are always on the bottom status line(s); older scrollback
-# should not count.
-_BUSY_TAIL_LINES = 3
+# Past-tense completion marker: `✱ Crunched for 4s`, `✻ Sautéed for 52s`,
+# `* Cogitated for 9m 16s` — Claude prints this immediately after a
+# response finishes, so it acts as a positive signal of "the most
+# recent generation has ENDED". When this appears in tail BELOW any
+# busy markers, the busy markers are historical residue from the
+# previous generation, not the current state.
+SPINNER_DONE_RE = re.compile(r"^\s*[+*●·✻✢✽✺✱✶]\s+\w+\s+for\s+\d")
+
+# Fallback: any tail line ending in `…` is treated as busy even when no
+# spinner is on screen. Newer Claude builds occasionally render plain-text
+# busy hints with NO spinner glyph at all, e.g.
+#   "almost done thinking with high effort"
+#   "Manifesting…" (verb on its own line, spinner on previous line)
+# The ellipsis is the last reliable signal common to every Claude version
+# we've seen, so trust it. Excludes "..." (ASCII triple dot) to avoid
+# false-matching prose like "wait...".
+BUSY_ELLIPSIS_RE = re.compile(r"…\s*$")
+
+# Literal phrase markers that always mean Claude is busy. These cover
+# (a) the universal "esc to interrupt" hint Claude shows during generation,
+# and (b) recent plain-text busy hints that appeared in 2.1.x WITHOUT
+# a spinner glyph on the same line.
+BUSY_LITERALS = (
+    "esc to interrupt",
+    "thinking with",       # "almost done thinking with high effort"
+)
+
+# How many trailing MEANINGFUL non-empty lines to inspect for busy
+# markers. v0.4.13 widened this to 50 raw lines to defeat the status-
+# bar fragments problem, but that brought back a reverse bug: after
+# Claude finishes, old `Manifesting…` etc. busy lines still sit in
+# the PTY tail buffer (it's a 40k-char rolling window, not a screen
+# emulator) and a 50-line scan would re-detect them as "busy now".
+#
+# v0.4.14: scan only LINES THAT ARE MEANINGFUL (len ≥ 4 chars,
+# excluding pure-digit fragments). Status-bar per-character redraws
+# leave 1-3-char fragments (`1`, `82`, `p2`, `↓`) — none of which
+# carry busy semantics — so they no longer count toward the window
+# and 10 meaningful lines is plenty to cover the live busy marker
+# while staying close enough to "right now" that we don't dredge
+# stale ones from previous responses.
+_BUSY_TAIL_LINES = 10
+_BUSY_MIN_LINE_LEN = 4
 
 
 @dataclass
@@ -98,21 +150,81 @@ def is_idle(
     clean = _strip_ansi(tail_output)
     lines = [ln.rstrip() for ln in clean.splitlines() if ln.strip()]
 
-    # signal 1: empty prompt in last 10 non-empty lines (wider window so
-    # trailing status-bar lines after the prompt don't push it out of view)
-    tail_lines_for_prompt = lines[-10:]
+    # signal 1: empty prompt in last 30 non-empty lines. Widened from 10
+    # to 30 because Claude Code 2.1.121's status bar issues per-character
+    # cursor-move ANSI updates that, after stripping, manifest as many
+    # 1-3-char "lines" at the bottom of tail; the actual prompt glyph
+    # routinely lands at line -15 to -25 in busy sessions. Without a
+    # wide window the L1 fast path never sees the prompt and we fall
+    # all the way to L2 force-dispatch every time.
+    tail_lines_for_prompt = lines[-30:]
     has_empty_prompt = any(
         PROMPT_RE_END.search(ln) or PROMPT_RE_LINE.search(ln)
         for ln in tail_lines_for_prompt
     )
 
-    # signal 2: no busy marker in the LAST FEW lines (not whole tail),
-    # so stale indicators from earlier answers don't keep us stuck.
-    tail_lines = lines[-_BUSY_TAIL_LINES:]
-    busy = (
-        any(BUSY_STATUS_RE.search(ln) for ln in tail_lines)
-        or any(lit in ln for ln in tail_lines for lit in BUSY_LITERALS)
-    )
+    # signal 2: no busy marker in the last few MEANINGFUL lines (filter
+    # out 1-3-char status-bar fragments so they don't bury the real
+    # busy line nor inflate the scan window with noise). Three
+    # independent detectors — ANY hit means busy:
+    #   a) spinner + verb + ellipsis  (canonical Claude busy line)
+    #   b) bare line ending in `…`    (rare: spinner glyph dropped by
+    #      partial PTY redraw; verb on its own line — observed in 2.1.121)
+    #   c) literal phrase             ("esc to interrupt", "thinking with")
+    meaningful_lines = [
+        ln for ln in lines
+        if len(ln.strip()) >= _BUSY_MIN_LINE_LEN
+        and not ln.strip().isdigit()
+    ]
+
+    # **PROMPT-RELATIVE busy scan** — the strongest signal we have for
+    # "Claude already finished and is back at the input prompt".
+    #
+    # When `❯` (or any prompt glyph) is visible in the tail, anything
+    # ABOVE it is by definition past — Claude rendered the input
+    # prompt, so the response that came before is over. Old
+    # `Manifesting…` lines from the previous generation may still
+    # linger in the rolling 40k PTY buffer above the new prompt, but
+    # they are NOT current state. Only inspect lines BELOW the most
+    # recent prompt for live busy markers.
+    #
+    # When no prompt is visible (the prompt is hidden during active
+    # generation), fall back to scanning the last N meaningful lines
+    # plus the busy/done position comparison below.
+    last_prompt_idx_in_meaningful = -1
+    for i in range(len(meaningful_lines) - 1, -1, -1):
+        ln = meaningful_lines[i]
+        if PROMPT_RE_END.search(ln) or PROMPT_RE_LINE.search(ln):
+            last_prompt_idx_in_meaningful = i
+            break
+
+    if last_prompt_idx_in_meaningful >= 0:
+        # Claude is at an input prompt — only "now" is below it.
+        tail_lines = meaningful_lines[last_prompt_idx_in_meaningful + 1:]
+    else:
+        tail_lines = meaningful_lines[-_BUSY_TAIL_LINES:]
+
+    # Compare positions: if a "completion" marker (e.g. "Crunched for 4s")
+    # appears AFTER any busy markers in the tail, the busy markers are
+    # historical residue from the previous generation — Claude has
+    # finished and is now idle. This is the secondary safety check
+    # for the "no-prompt-visible" branch above.
+    busy_idx = -1
+    done_idx = -1
+    for i, ln in enumerate(tail_lines):
+        if (BUSY_STATUS_RE.search(ln) or BUSY_ELLIPSIS_RE.search(ln)
+                or any(lit in ln for lit in BUSY_LITERALS)):
+            busy_idx = i
+        if SPINNER_DONE_RE.search(ln):
+            done_idx = i
+
+    if busy_idx == -1:
+        busy = False
+    elif done_idx > busy_idx:
+        # Completion marker is more recent than any busy marker → idle.
+        busy = False
+    else:
+        busy = True
 
     # signal 3: content stable for debounce_s
     h = hashlib.md5(clean.encode("utf-8", errors="replace")).hexdigest()
@@ -170,6 +282,25 @@ Let me draft the change.
 ✻  esc to interrupt
 """
 
+# Real captures from Claude Code 2.1.121 PTY tail. These are the formats
+# that broke the v0.4.6 regex (no space between spinner and verb).
+_FAKE_BUSY_NOSPACE = """
+Some prior answer text.
+✻Manifesting…
+"""
+
+_FAKE_BUSY_SPINNERLESS = """
+Some prior answer text.
+almost done thinking with high effort
+"""
+
+# Verb on its own line WITHOUT a spinner glyph (observed when partial
+# PTY redraws split the busy hint across two lines).
+_FAKE_BUSY_VERB_ALONE = """
+Some prior answer text.
+Manifesting…
+"""
+
 
 def _self_test() -> int:
     # IDLE fixture → should eventually become idle after debounce
@@ -207,6 +338,25 @@ def _self_test() -> int:
         assert r.reasons["not_busy"] is False, "thinking: ✻ or esc should mark busy"
         assert r.idle is False
         apply_result(s3, r)
+
+    # 2.1.121 regression: `✻Manifesting…` (no space) must mark busy.
+    s_no_space = IdleState()
+    r_ns = is_idle(_FAKE_BUSY_NOSPACE, s_no_space, now=0.0, debounce_s=0.6)
+    assert r_ns.reasons["not_busy"] is False, \
+        f"`✻Manifesting…` should mark busy; got {r_ns.reasons}"
+    assert r_ns.idle is False
+
+    # 2.1.121 regression: spinner-less hint `almost done thinking with high effort`
+    s_no_spinner = IdleState()
+    r_nsp = is_idle(_FAKE_BUSY_SPINNERLESS, s_no_spinner, now=0.0, debounce_s=0.6)
+    assert r_nsp.reasons["not_busy"] is False, \
+        f"`thinking with high effort` should mark busy; got {r_nsp.reasons}"
+
+    # 2.1.121 regression: verb on its own line, ending in ellipsis
+    s_verb_alone = IdleState()
+    r_va = is_idle(_FAKE_BUSY_VERB_ALONE, s_verb_alone, now=0.0, debounce_s=0.6)
+    assert r_va.reasons["not_busy"] is False, \
+        f"bare `Manifesting…` should mark busy; got {r_va.reasons}"
 
     # drift: push a fixture without PROMPT_RE and without busy; 31 seconds later → drift
     drift_fixture = "plain text output\nno prompt here\nno busy markers\n"

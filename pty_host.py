@@ -51,7 +51,7 @@ class PtyHost:
         `on_data` for live passthrough.
     """
 
-    def __init__(self, spec: SpawnSpec, tail_chars: int = 4000):
+    def __init__(self, spec: SpawnSpec, tail_chars: int = 40000):
         if not _HAS_WINPTY:
             raise RuntimeError("pywinpty (winpty) is not installed. "
                                "run: pip install pywinpty")

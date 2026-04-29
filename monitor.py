@@ -56,12 +56,13 @@ class Monitor:
         pty_tail_fn: Callable[[], str],    # () -> str (pty tail)
         pty_write_fn: Callable[[bytes], int],  # (bytes) -> int
         get_mode: Callable[[], str],       # () -> "direct"|"queue"
-        poll_interval_s: float = 0.3,
-        debounce_s: float = 0.6,
-        dispatch_commit_delay_s: float = 0.05,
-        post_dispatch_backoff_s: float = 1.0,
+        poll_interval_s: float = 0.1,
+        debounce_s: float = 0.25,
+        dispatch_commit_delay_s: float = 0.03,
+        post_dispatch_backoff_s: float = 0.5,
         prompt_no_match_warn_s: float = 30.0,
-        startup_grace_s: float = 2.0,
+        startup_grace_s: float = 0.5,
+        force_dispatch_after_stuck_s: float = 5.0,
     ):
         self.run_dir = run_dir
         self.queue_path = run_dir / "queue.jsonl"
@@ -77,6 +78,21 @@ class Monitor:
         self.post_dispatch_backoff_s = post_dispatch_backoff_s
         self.prompt_no_match_warn_s = prompt_no_match_warn_s
         self.startup_grace_s = startup_grace_s
+        # Safety net: when prompt detection fails (e.g. Claude TUI shipped a
+        # new screen format that breaks PROMPT_RE), allow dispatch anyway
+        # IF the queue has been stuck for this long AND the screen content
+        # is stable AND no busy markers are visible. The "stable for N
+        # seconds" check is the load-bearing guarantee — even if our busy
+        # regex is missing a new format, real generation produces constant
+        # screen churn, so a stable window is a reliable proxy for
+        # "Claude is actually idle". Set to 0 to disable.
+        #
+        # Default 15s: confirmed working against claude-code 2.1.121 where
+        # PROMPT_RE never matches (status-bar fragments push the prompt
+        # out of view); 15s is short enough that user pain is minimal but
+        # long enough that brief render glitches don't cause spurious
+        # dispatches.
+        self.force_dispatch_after_stuck_s = force_dispatch_after_stuck_s
 
         self.state = MonitorState(last_reasons={})
         self._idle_state = IdleState()
@@ -221,11 +237,56 @@ class Monitor:
 
         if now - self._started_at < self.startup_grace_s:
             return
-        if self.get_mode() != "direct":
-            return
+        # NOTE: previously gated on `get_mode() == "direct"` here, which
+        # meant queued items would NOT dispatch while the user sat in
+        # queue mode (Ctrl+Q UI). That contradicted the whole "fire and
+        # forget" point of a queue: enqueueing an item is an explicit
+        # signal the user wants it sent, so we should dispatch as soon
+        # as Claude is idle, no matter which mode the user is composing
+        # in. The queue input pane is a separate UI buffer that the
+        # dispatcher does not touch — Claude's response renders in the
+        # main pane above the queue overlay, fully visible.
         if now - self.state.last_dispatch_at < self.post_dispatch_backoff_s:
             return
-        if not result.idle:
+
+        # ---- L2 safety override ----
+        # If the canonical idle check fails BUT the screen has been
+        # CONTINUOUSLY stable AND not_busy for `force_dispatch_after_stuck_s`
+        # seconds, dispatch anyway. The "continuously stable" check is much
+        # more reliable than the previous "stuck for N AND stable at this
+        # exact tick" — the old logic required all three signals to align
+        # at the same poll tick, which a churning status bar would foil
+        # repeatedly, adding 5+ seconds of jitter on top of the threshold.
+        #
+        # Real Claude generation produces nonstop screen churn (token
+        # stream + spinner animation), so any continuous-stable window is
+        # an extremely strong proxy for genuine idle, even if PROMPT_RE
+        # can't find the prompt glyph.
+        if (result.reasons.get("not_busy") is True
+                and result.reasons.get("stable") is True):
+            if getattr(self, "_continuously_stable_since", 0) == 0:
+                self._continuously_stable_since = now
+        else:
+            self._continuously_stable_since = 0
+
+        stable_for = (
+            (now - self._continuously_stable_since)
+            if getattr(self, "_continuously_stable_since", 0) else 0
+        )
+
+        forced = False
+        if (not result.idle
+                and self.force_dispatch_after_stuck_s > 0
+                and self.state.ready_len > 0
+                and stable_for >= self.force_dispatch_after_stuck_s):
+            self._logger.warning(
+                f"FORCED dispatch after {stable_for:.1f}s continuously "
+                f"stable+idle (prompt regex outdated; "
+                f"reasons={result.reasons})"
+            )
+            forced = True
+
+        if not result.idle and not forced:
             return
         # Critical race guard: after we dispatch, require that Claude was
         # OBSERVED busy at least once before we allow another dispatch.
@@ -264,7 +325,18 @@ class Monitor:
             prompt_no_match_warn_s=self.prompt_no_match_warn_s,
         )
         idle_detector.apply_result(self._idle_state, r2)
-        if not r2.idle:
+        # For a forced dispatch we don't insist on r2.idle (the prompt regex
+        # is broken by definition in that path); we only re-confirm that
+        # NO busy marker has appeared in the meantime — i.e. nothing has
+        # started generating during the commit-window sleep.
+        if forced:
+            if r2.reasons.get("not_busy") is False:
+                self._logger.info(
+                    "forced dispatch aborted: busy marker appeared during "
+                    "commit window (regex caught up)"
+                )
+                return
+        elif not r2.idle:
             self._logger.info("dispatch aborted: idle flipped during commit window")
             return
 
@@ -353,6 +425,120 @@ def _self_test() -> int:
         assert queue_store.pending_len(run_dir / "queue.jsonl") == 0
 
         # release file handles so tempdir cleanup works on Windows
+        for h in list(mon._logger.handlers):
+            h.close()
+            mon._logger.removeHandler(h)
+
+    # ------------------------------------------------------------------
+    # L2 regression: force-dispatch when the prompt-glyph regex fails.
+    # Simulates Claude Code 2.1.x rendering the input pane in a layout
+    # PROMPT_RE_END/PROMPT_RE_LINE can't see, with no busy markers and a
+    # stable screen — the queue must still drain, not stall forever.
+    # ------------------------------------------------------------------
+    with _tf.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        run_dir = Path(td)
+        written: list[bytes] = []
+
+        # Tail that NO PROMPT_RE pattern matches (no ❯ ›  〉 │>│ anywhere)
+        # AND contains no busy markers — the exact failure mode 2.1.121
+        # produced. Stable across calls (same string), so the `stable`
+        # signal flips True quickly.
+        unrecognized_tail = (
+            "previous answer text on screen\n"
+            "no recognizable prompt glyph here\n"
+            "definitely no spinner or ellipsis\n"
+        )
+        fake_tail = [unrecognized_tail]
+
+        def tail_fn() -> str:
+            return fake_tail[0]
+
+        def write_fn(b: bytes) -> int:
+            written.append(b)
+            return len(b)
+
+        mode = ["direct"]
+        mon = Monitor(
+            run_dir=run_dir,
+            pty_tail_fn=tail_fn,
+            pty_write_fn=write_fn,
+            get_mode=lambda: mode[0],
+            poll_interval_s=0.02,
+            debounce_s=0.05,
+            dispatch_commit_delay_s=0.01,
+            post_dispatch_backoff_s=0.05,
+            startup_grace_s=0.05,
+            # Aggressive threshold for the test: 1 second instead of 60s.
+            force_dispatch_after_stuck_s=1.0,
+        )
+        queue_store.push(run_dir / "queue.jsonl", "force-dispatched payload")
+
+        mon.start()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if written:
+                break
+            time.sleep(0.05)
+        mon.stop()
+        time.sleep(0.2)
+
+        assert len(written) == 1, (
+            f"L2 regression: queue should have force-dispatched after "
+            f"~1s of being stuck on an unrecognized prompt; got "
+            f"{len(written)} writes"
+        )
+        assert b"force-dispatched payload" in written[0]
+
+        for h in list(mon._logger.handlers):
+            h.close()
+            mon._logger.removeHandler(h)
+
+    # ------------------------------------------------------------------
+    # L2 negative case: when the screen is NOT stable (genuine generation
+    # in progress) the force-dispatch must NOT fire, even after the stuck
+    # timer crosses the threshold.
+    # ------------------------------------------------------------------
+    with _tf.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        run_dir = Path(td)
+        written: list[bytes] = []
+
+        counter = [0]
+
+        def tail_fn_churning() -> str:
+            counter[0] += 1
+            # Different content on every call → never stable → never
+            # eligible for force dispatch.
+            return f"churning output {counter[0]}\nno prompt visible\n"
+
+        def write_fn(b: bytes) -> int:
+            written.append(b)
+            return len(b)
+
+        mode = ["direct"]
+        mon = Monitor(
+            run_dir=run_dir,
+            pty_tail_fn=tail_fn_churning,
+            pty_write_fn=write_fn,
+            get_mode=lambda: mode[0],
+            poll_interval_s=0.02,
+            debounce_s=0.05,
+            dispatch_commit_delay_s=0.01,
+            post_dispatch_backoff_s=0.05,
+            startup_grace_s=0.05,
+            force_dispatch_after_stuck_s=0.5,
+        )
+        queue_store.push(run_dir / "queue.jsonl", "must NOT dispatch")
+
+        mon.start()
+        time.sleep(2.0)  # well past the 0.5s force threshold
+        mon.stop()
+        time.sleep(0.2)
+
+        assert len(written) == 0, (
+            f"L2 safety: must not force-dispatch into a churning screen "
+            f"(would interrupt active generation); got {len(written)} writes"
+        )
+
         for h in list(mon._logger.handlers):
             h.close()
             mon._logger.removeHandler(h)

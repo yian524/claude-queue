@@ -88,6 +88,16 @@ except Exception:
     _HAS_WCI = False
 
 
+# Paste detection threshold: any keystroke arriving less than this
+# many seconds after the previous one is treated as part of a paste
+# burst (clipboard-driven), not human typing. Real human typing is
+# at minimum ~30ms between keys; clipboard paste delivers chars at
+# sub-millisecond intervals via the Windows console input queue.
+# 5ms is well below any plausible human speed but generous enough
+# to absorb scheduler jitter on slow machines.
+_PASTE_GAP_S = 0.005
+
+
 # Virtual-key codes we care about
 VK_RETURN = 0x0D
 VK_ESCAPE = 0x1B
@@ -136,12 +146,27 @@ class TerminalRelay:
         # (not visual columns). Range: 0..len(_queue_buf).
         # len() == at end of buffer; 0 == at very start.
         self._cursor_pos: int = 0
+        # Paste detection: track timestamp of the previous keystroke so we
+        # can identify multi-character bursts. Windows Terminal converts
+        # Ctrl+V into a stream of synthetic keystrokes (one per character);
+        # without bracketed paste support, embedded `\r` characters fire
+        # the VK_RETURN handler and submit Claude's input mid-paste,
+        # truncating the user's content. We use a sub-human-typing-speed
+        # gap as the heuristic: if VK_RETURN arrives less than
+        # _PASTE_GAP_S after the previous key, it is treated as a literal
+        # newline within a paste, not a human-pressed Enter.
+        self._last_key_time: float = 0.0
         self._input_row = 0  # terminal row where input cursor lives (set by render)
         self._input_col_base = 0
         # --- dropdown autocomplete state (queue mode) ---
         self._dropdown_active: bool = False
         self._dropdown_items: list[dict] = []
         self._dropdown_selected: int = 0
+        # When True the dropdown is showing Claude native commands (the
+        # `//` namespace) rather than queue-internal commands. Affects
+        # how _apply_dropdown_selection populates the buffer and how
+        # the dropdown header is rendered.
+        self._claude_picker_mode: bool = False
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -223,6 +248,19 @@ class TerminalRelay:
 
     def _handle_key(self, k) -> None:
         """Process one decoded Key event."""
+        # ---- Paste-burst detection ----
+        # Compute the gap since the last keystroke BEFORE we update the
+        # timestamp; sub-_PASTE_GAP_S means this key is part of a paste
+        # burst, not a human keystroke. The flag is consulted by the
+        # VK_RETURN handler (and only there — every other handler treats
+        # paste content the same as typed content).
+        _now = time.monotonic()
+        is_paste_continuation = (
+            self._last_key_time > 0
+            and (_now - self._last_key_time) < _PASTE_GAP_S
+        )
+        self._last_key_time = _now
+
         # ---- Dropdown navigation (queue mode, dropdown open) ----
         # Arrow keys + Tab + Enter are intercepted BEFORE normal handling so
         # the dropdown takes priority.
@@ -280,18 +318,38 @@ class TerminalRelay:
         # - Alt+Enter    -> same as Ctrl+Enter
         # In queue mode we only treat plain Enter as "commit"; modifier+Enter
         # inserts a literal newline into the queue buffer.
+        #
+        # Paste protection: if this VK_RETURN arrives < _PASTE_GAP_S after
+        # the previous keystroke, it is overwhelmingly likely an embedded
+        # `\r` from a multi-line clipboard paste, not a human pressing
+        # Enter. Treat it the same as Ctrl+Enter (literal newline) so the
+        # paste continues into the input box instead of submitting a
+        # half-pasted message and stranding the rest of the content.
         if k.vkey == VK_RETURN:
             is_plain = not (k.ctrl or k.shift or k.alt)
+            treat_as_newline = (not is_plain) or is_paste_continuation
             if self._mode == "queue":
-                if is_plain:
-                    self._commit_queue_input()
-                else:
-                    # newline inside queue buffer
-                    self._queue_buf.append("\n")
+                if treat_as_newline:
+                    # newline inside queue buffer (insert at cursor for
+                    # consistency with plain-character handling).
+                    self._queue_buf.insert(self._cursor_pos, "\n")
+                    self._cursor_pos += 1
                     self._update_input_line()
+                else:
+                    self._commit_queue_input()
                 return
             # direct mode
-            if is_plain:
+            if treat_as_newline:
+                # Modifier+Enter, OR a `\r` that arrived inside a paste
+                # burst. Send a literal newline; Claude's Ink TUI keeps
+                # adding to the input box rather than submitting.
+                if is_paste_continuation:
+                    self._debug("NEWLINE (paste-burst \\r) sent=b'\\n'")
+                else:
+                    self._debug(f"NEWLINE (modifier+Enter) sent=b'\\n' "
+                                f"ctrl={k.ctrl} shift={k.shift} alt={k.alt}")
+                self._send_to_pty(b"\n")
+            else:
                 payload = os.environ.get("CLAUDE_Q_ENTER", "cr").lower()
                 if payload == "lf":
                     data = b"\n"
@@ -301,11 +359,6 @@ class TerminalRelay:
                     data = b"\r"
                 self._debug(f"ENTER sent={data!r}")
                 self._send_to_pty(data)
-            else:
-                # Ctrl/Shift/Alt + Enter -> literal newline
-                self._debug(f"NEWLINE (modifier+Enter) sent=b'\\n' "
-                            f"ctrl={k.ctrl} shift={k.shift} alt={k.alt}")
-                self._send_to_pty(b"\n")
             return
 
         # ---- Queue-mode cursor navigation & edit keys ----
@@ -364,10 +417,35 @@ class TerminalRelay:
             self._send_to_pty(b"\x1b[3~")
             return
 
-        # ---- Tab ----
+        # ---- Tab / Shift+Tab ----
+        # Plain Tab     -> \t
+        # Shift+Tab     -> \x1b[Z (CSI Z, "back-tab"). Required for Claude
+        #                  Code Ink TUI mode-switching (auto/plan/etc.).
         if k.vkey == VK_TAB:
             if self._mode == "direct":
-                self._send_to_pty(b"\t")
+                if k.shift:
+                    self._debug("shift+tab sent=\\x1b[Z")
+                    self._send_to_pty(b"\x1b[Z")
+                else:
+                    self._send_to_pty(b"\t")
+            return
+
+        # ---- Alt+letter (meta-prefix: ESC + letter) ----
+        # Required for features like Alt+V (paste image from clipboard) in
+        # Claude Code's Ink TUI on Windows (B21="alt+v" in claude.exe).
+        # MUST be checked BEFORE the plain-character handler: depending on
+        # keyboard layout / IME state, Windows can report Alt+letter with
+        # UnicodeChar=letter set, in which case the plain-character branch
+        # would swallow it and send the bare letter (no ESC prefix), causing
+        # Alt+V to be typed as a literal 'v' instead of triggering image paste.
+        if k.alt and not k.ctrl and 0x41 <= k.vkey <= 0x5A:
+            if self._mode == "direct":
+                # Lowercase letter follows ESC (xterm convention).
+                letter = chr(k.vkey + 0x20)  # 'A'->'a', ... 'Z'->'z'
+                payload = b"\x1b" + letter.encode("ascii")
+                self._debug(f"alt+{letter} sent={payload!r} "
+                            f"(text was {k.text!r})")
+                self._send_to_pty(payload)
             return
 
         # ---- Plain character (includes Chinese via IME commit) ----
@@ -383,8 +461,8 @@ class TerminalRelay:
                 self._send_to_pty(k.text.encode("utf-8", errors="replace"))
             return
 
-        # ---- Ctrl+letter / other ----
-        if k.ctrl and 0x41 <= k.vkey <= 0x5A:
+        # ---- Ctrl+letter ----
+        if k.ctrl and not k.alt and 0x41 <= k.vkey <= 0x5A:
             # Ctrl+A..Z -> \x01..\x1A
             b = bytes([k.vkey - 0x40])
             self._debug(f"ctrl+{chr(k.vkey)} sent={b!r}")
@@ -528,16 +606,40 @@ class TerminalRelay:
         if isinstance(parsed, _slash.ClearRequest):
             self._handle_clear()
             return
+        if isinstance(parsed, _slash.ClaudeEnterRequest):
+            # Open the dropdown showing every native Claude /command so
+            # the user can pick one. Stays in queue mode so they can
+            # confirm with Enter to queue the chosen /command for
+            # Claude's TUI to execute on dispatch.
+            self._open_native_claude_dropdown()
+            return
         # (CancelRequest removed in v0.3.1 — Esc / Ctrl+Q already cancel)
 
         # QueueRequest or ForceSendRequest: exit mode and push/send
         self._exit_queue_mode(push=True, parsed=parsed)
 
+    def _open_native_claude_dropdown(self) -> None:
+        """Open the Claude native command picker — same UX as typing
+        `//` directly. The buffer is set to `//` so subsequent typing
+        narrows the filter, and on Enter the picker mode handler
+        normalizes back to `/cmd` for dispatch."""
+        self._queue_buf = ["/", "/"]
+        self._cursor_pos = 2
+        self._dropdown_items = _slash.discover_native_commands()
+        self._dropdown_active = bool(self._dropdown_items)
+        self._dropdown_selected = 0
+        self._claude_picker_mode = True
+        self._render_queue_ui(
+            note="Claude native picker — ↑↓ select, Enter queues for dispatch"
+        )
+
     @staticmethod
     def _help_text() -> str:
-        """One-line help shown in queue UI when user types /help."""
-        return ("/wait <dur> msg | /at <time> msg | /priority msg | /now msg "
-                "| /drop N | /clear | /help  (Esc or Ctrl+Q cancels)")
+        """One-line help shown in queue UI when user types /qhelp."""
+        return ("/wait <dur> msg | /at <time> msg | /priority msg | "
+                "/now msg | /drop N | /qclear | /qhelp || "
+                "Type `//` to browse Claude's native commands "
+                "(skills + plugins + built-in)")
 
     # ------------------------- /drop /clear handlers -------------------------
 
@@ -675,15 +777,32 @@ class TerminalRelay:
         # Dropdown autocomplete (when user is typing a /command name)
         if self._dropdown_active and self._dropdown_items:
             add("\x1b[36m║" + " " * (cols - 2) + "║\x1b[0m")
-            hdr = "  \x1b[1;36mCommands\x1b[0m  (↑↓ select, Tab/Enter pick, Esc close)"
-            # account for ANSI codes in length calc
-            visible = "  Commands  (↑↓ select, Tab/Enter pick, Esc close)"
-            pad = cols - 2 - len(visible)
-            add("\x1b[36m║\x1b[0m" + hdr + " " * max(0, pad) + "\x1b[36m║\x1b[0m")
+            # Header reflects whether this is queue-internal or Claude
+            # native picker so the user knows which namespace they're in.
+            if self._claude_picker_mode:
+                hdr_visible = ("  Claude native commands  "
+                               "(↑↓ select, Tab/Enter pick, Esc close)")
+                hdr_color = ("  \x1b[1;35mClaude native commands\x1b[0m  "
+                             "(↑↓ select, Tab/Enter pick, Esc close)")
+            else:
+                hdr_visible = ("  Queue commands  "
+                               "(↑↓ select, Tab/Enter pick, Esc close)")
+                hdr_color = ("  \x1b[1;36mQueue commands\x1b[0m  "
+                             "(↑↓ select, Tab/Enter pick, Esc close)")
+            pad = cols - 2 - len(hdr_visible)
+            add("\x1b[36m║\x1b[0m" + hdr_color
+                + " " * max(0, pad) + "\x1b[36m║\x1b[0m")
             for i, item in enumerate(self._dropdown_items):
                 is_sel = (i == self._dropdown_selected)
                 marker = "►" if is_sel else " "
-                label = f"    {marker} {item['template']:<44}  {item['summary']}"
+                # Source badge (only meaningful in Claude picker mode):
+                #   skill / plugin / built-in
+                src = item.get("source", "")
+                badge = ""
+                if self._claude_picker_mode and src:
+                    badge = f"[{src}] "
+                template = item.get("template", item["name"])
+                label = f"    {marker} {template:<28}  {badge}{item['summary']}"
                 if len(label) > cols - 4:
                     label = label[: cols - 7] + "..."
                 pad = cols - 2 - len(label)
@@ -758,31 +877,47 @@ class TerminalRelay:
         """Recompute dropdown visibility from current buffer contents.
 
         Rules:
-          - Only active when the first char is '/' and the buffer contains
-            no space yet (i.e., user is still typing the command name).
-          - Filter COMMANDS by prefix match.
-          - Keep selection index in bounds.
+          - `//` prefix → Claude native picker (built-in + skills + plugins)
+          - `/`  prefix → queue-internal commands (/wait /at /priority …)
+          - Otherwise → no dropdown.
+          - Either flavour stops once a space appears (user moved past
+            the command name into args).
         """
         buf = "".join(self._queue_buf)
-        if buf.startswith("/") and " " not in buf:
-            self._dropdown_items = _slash.filter_commands(buf)
+        if buf.startswith("//") and " " not in buf[2:]:
+            # Claude native picker; pass `/x` (single slash) to filter so
+            # the existing prefix-match logic Just Works.
+            search = buf[1:]  # strip ONE leading slash
+            self._dropdown_items = _slash.filter_commands(search, claude_picker=True)
             self._dropdown_active = bool(self._dropdown_items)
-            if self._dropdown_selected >= max(1, len(self._dropdown_items)):
-                self._dropdown_selected = 0
+            self._claude_picker_mode = True
+        elif (buf.startswith("/") and not buf.startswith("//")
+              and " " not in buf):
+            self._dropdown_items = _slash.filter_commands(buf, claude_picker=False)
+            self._dropdown_active = bool(self._dropdown_items)
+            self._claude_picker_mode = False
         else:
             self._dropdown_active = False
             self._dropdown_items = []
+            self._dropdown_selected = 0
+            self._claude_picker_mode = False
+        if self._dropdown_selected >= max(1, len(self._dropdown_items)):
             self._dropdown_selected = 0
 
     def _apply_dropdown_selection(self) -> None:
         """Replace buffer with the currently selected command template,
         close the dropdown, and keep the user in queue mode to type args.
+
+        For Claude-picker mode (`//` prefix), the picked entry's name is
+        already in `/<x>` form. We deliberately set the buffer to the
+        single-slash version so `parse()` on Enter dispatches `/<x>` to
+        Claude (not `//<x>` which Claude wouldn't recognize).
         """
         if not self._dropdown_items:
             return
         item = self._dropdown_items[self._dropdown_selected]
         name = item["name"]
-        has_args = "<" in item["template"]
+        has_args = "<" in item.get("template", "")
         new_buf = name + (" " if has_args else "")
         self._queue_buf = list(new_buf)
         # Park cursor at the END of the inserted template so the user
@@ -792,6 +927,7 @@ class TerminalRelay:
         self._cursor_pos = len(self._queue_buf)
         self._dropdown_active = False
         self._dropdown_items = []
+        self._claude_picker_mode = False
         self._update_input_line()
 
     # ------------------------- PTY write wrapper -------------------------
@@ -833,13 +969,25 @@ class TerminalRelay:
                 if data.get("idle"):
                     return "Next: ASAP — Claude is idle, dispatching soon"
                 blockers = []
-                if reasons.get("prompt_visible") is False:
-                    blockers.append("Claude's input has draft text "
-                                    "(submit or clear it)")
                 if reasons.get("not_busy") is False:
                     blockers.append("Claude is busy")
                 if reasons.get("stable") is False:
                     blockers.append("Claude output still changing")
+                if reasons.get("prompt_visible") is False:
+                    # Two possible causes; we cannot tell from `reasons`
+                    # alone, so describe both. Common in claude-code 2.1+
+                    # is the second case (TUI redraw quirk).
+                    stuck_s = data.get("stuck_seconds") or 0
+                    if stuck_s >= 10:
+                        blockers.append(
+                            "Claude prompt not detected — will force "
+                            "dispatch shortly (TUI may have changed)"
+                        )
+                    else:
+                        blockers.append(
+                            "Claude prompt not visible (input has draft "
+                            "text, or TUI is redrawing)"
+                        )
                 if blockers:
                     return "Waiting: " + "; ".join(blockers)
         except Exception:
