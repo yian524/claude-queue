@@ -371,6 +371,37 @@ def test_recovery_within_one_second_of_idle_return():
 #             (the trickiest false-positive scenario)
 # ============================================================
 
+def test_prose_containing_arrow_glyph_is_not_mistaken_for_prompt():
+    """Code-review-fixed (post-3560bd1): a Claude response that contains
+    `❯` inside prose (e.g. quoting shell output, code review showing
+    redirects, instructional text) must NOT be treated as a prompt
+    boundary. Otherwise position-based busy scan cuts the tail at the
+    prose, sees no busy markers below, and falsely reports idle while
+    Claude is still generating.
+
+    Fix: only `PROMPT_RE_LINE` (line consisting solely of the prompt
+    glyph + whitespace) counts as a prompt boundary; `PROMPT_RE_END`
+    (line ending with the glyph) is too lenient for this purpose.
+    """
+    import idle_detector
+
+    # Claude generating a response that *contains* `❯` in prose,
+    # plus an active busy marker below — must report busy.
+    tail_with_prose_arrow = (
+        "Sure, here's how shell redirection works:\n"
+        "use the > or ❯ symbol like this:\n"   # ❯ in PROSE (end of line)
+        "echo hi > /tmp/file\n"
+        "and the busy spinner is still active because Claude is mid-stream\n"
+        "✻Manifesting…\n"  # genuine busy marker
+    )
+    s = idle_detector.IdleState()
+    r = idle_detector.is_idle(tail_with_prose_arrow, s, now=1.0)
+    assert r.reasons["not_busy"] is False, (
+        f"prose-`❯` must NOT be treated as prompt boundary; "
+        f"genuine busy must still be detected. reasons={r.reasons}"
+    )
+
+
 def test_no_dispatch_when_busy_line_buried_far_above_status_fragments():
     """Regression v0.4.13: real-world report — Claude was responding
     (`✱ Baking…`) but our 5-line scan window saw only the status-bar

@@ -276,6 +276,16 @@ def discover_native_commands(cwd: Optional[Path] = None) -> list[dict]:
     skills_dir = home / ".claude" / "skills"
     if skills_dir.exists():
         for skill_md in skills_dir.glob("*/SKILL.md"):
+            # Defensive: refuse to follow symlinks. Reviewer of
+            # commit 3560bd1 noted that a malicious skill dir could
+            # symlink SKILL.md to e.g. C:\Windows\System32\config\SAM
+            # — even though contents only hit display strings, reading
+            # arbitrary files is worth avoiding.
+            try:
+                if not skill_md.is_file() or skill_md.is_symlink():
+                    continue
+            except OSError:
+                continue
             meta = _read_skill_metadata(skill_md)
             if not meta:
                 continue
@@ -311,6 +321,11 @@ def discover_native_commands(cwd: Optional[Path] = None) -> list[dict]:
                 if not pdir.exists():
                     continue
                 for cmd_md in pdir.glob("*/commands/*.md"):
+                    try:
+                        if not cmd_md.is_file() or cmd_md.is_symlink():
+                            continue
+                    except OSError:
+                        continue
                     cmd_name = cmd_md.stem
                     qualified = f"/{plugin_name}:{cmd_name}"
                     if qualified in seen_plugin_cmds:
@@ -332,6 +347,11 @@ def discover_native_commands(cwd: Optional[Path] = None) -> list[dict]:
     user_cmd_dir = home / ".claude" / "commands"
     if user_cmd_dir.exists():
         for cmd_md in user_cmd_dir.glob("*.md"):
+            try:
+                if not cmd_md.is_file() or cmd_md.is_symlink():
+                    continue
+            except OSError:
+                continue
             cmd_name = cmd_md.stem
             summary = _read_command_summary(cmd_md)
             out.append({
@@ -351,6 +371,11 @@ def discover_native_commands(cwd: Optional[Path] = None) -> list[dict]:
     project_cmd_dir = project_root / ".claude" / "commands"
     if project_cmd_dir.exists():
         for cmd_md in project_cmd_dir.glob("*.md"):
+            try:
+                if not cmd_md.is_file() or cmd_md.is_symlink():
+                    continue
+            except OSError:
+                continue
             cmd_name = cmd_md.stem
             summary = _read_command_summary(cmd_md)
             out.append({

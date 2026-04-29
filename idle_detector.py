@@ -191,10 +191,17 @@ def is_idle(
     # When no prompt is visible (the prompt is hidden during active
     # generation), fall back to scanning the last N meaningful lines
     # plus the busy/done position comparison below.
+    # IMPORTANT: position-cut uses ONLY PROMPT_RE_LINE (a line that is
+    # solely the prompt glyph + whitespace), not PROMPT_RE_END which
+    # also matches any prose line ending with `❯` or `›`. Prose like
+    # "use the ❯ symbol" or quoted shell output would otherwise be
+    # mistaken for a prompt boundary, causing tail_lines below to
+    # become empty and falsely report idle while Claude is still
+    # generating. Code reviewer (3560bd1 review) flagged this.
     last_prompt_idx_in_meaningful = -1
     for i in range(len(meaningful_lines) - 1, -1, -1):
         ln = meaningful_lines[i]
-        if PROMPT_RE_END.search(ln) or PROMPT_RE_LINE.search(ln):
+        if PROMPT_RE_LINE.search(ln):
             last_prompt_idx_in_meaningful = i
             break
 

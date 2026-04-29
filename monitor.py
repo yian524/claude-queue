@@ -87,11 +87,13 @@ class Monitor:
         # screen churn, so a stable window is a reliable proxy for
         # "Claude is actually idle". Set to 0 to disable.
         #
-        # Default 15s: confirmed working against claude-code 2.1.121 where
-        # PROMPT_RE never matches (status-bar fragments push the prompt
-        # out of view); 15s is short enough that user pain is minimal but
-        # long enough that brief render glitches don't cause spurious
-        # dispatches.
+        # Default 5s (v0.4.11): once L1 prompt-scan window widened to
+        # 30 lines AND we tracked _continuously_stable_since (vs the
+        # old "stable AT this exact tick" check), the worst-case
+        # fallback shrunk from 15s to 5s without false positives. Real
+        # Claude generation produces nonstop screen churn, so 5
+        # continuous seconds of stable+not-busy is a strong idle
+        # signal even if PROMPT_RE failed entirely.
         self.force_dispatch_after_stuck_s = force_dispatch_after_stuck_s
 
         self.state = MonitorState(last_reasons={})
@@ -100,6 +102,14 @@ class Monitor:
         self._thread: Optional[threading.Thread] = None
         self._logger = self._make_logger()
         self._started_at = 0.0
+        # Tick-loop transient state. Declared here (rather than relying
+        # on getattr-with-default) so type-checkers and grep can see
+        # the lifetime; reviewer (3560bd1 review) flagged the implicit
+        # creation as a maintainability concern.
+        self._dispatch_stuck_since: float = 0.0
+        self._continuously_stable_since: float = 0.0
+        self._last_block_log: float = 0.0
+        self._last_tail_dump: float = 0.0
 
     # ------------------------- lifecycle -------------------------
 

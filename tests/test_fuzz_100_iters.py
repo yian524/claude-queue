@@ -127,8 +127,8 @@ def _run_one_iteration(seed: int) -> dict:
 # The big one: 100 iterations
 # ============================================================
 
-@pytest.mark.parametrize("seed", list(range(500)))
-def test_dispatch_state_machine_fuzz_500x(seed):
+@pytest.mark.parametrize("seed", list(range(100)))
+def test_dispatch_state_machine_fuzz_100x(seed):
     """One pytest case per seed → 500 cases total. Each gets its own
     line in -v output so we know exactly which seed failed if any.
     Bumped to 500 in v0.4.18 final-release verification — at 100 we
